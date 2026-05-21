@@ -125,6 +125,17 @@ export default function PlayerPage({ params }: Props) {
     heartbeatRef.current = setInterval(() => sendHeartbeat(id, "Start"), 30_000);
   }
 
+  function isSunnxtCdnUrl(url: string): boolean {
+    try {
+      const { hostname } = new URL(url);
+      // sunnxt.com subdomains (livestream, suntvvod1, etc.)
+      if (hostname.endsWith(".sunnxt.com") || hostname === "sunnxt.com") return true;
+      // Akamai CDN: movies1-suntvvod-dd.akamaized.net, movies2-suntvvod.akamaized.net …
+      if (hostname.endsWith(".akamaized.net") && hostname.includes("suntvvod")) return true;
+      return false;
+    } catch { return false; }
+  }
+
   async function startPlayback(video: VideoEntry, id: string) {
     if (!videoRef.current) return;
 
@@ -156,12 +167,11 @@ export default function PlayerPage({ params }: Props) {
       setError(`Playback error [${detail?.code ?? "?"}]: ${detail?.message || "unknown"}`);
     });
 
-    // Proxy requests to CORS-blocked SunNXT domains through our server
-    const CORS_BLOCKED = ["livestream.sunnxt.com", "suntvvod1.sunnxt.com"];
+    // Proxy requests to CORS-blocked / auth-required SunNXT domains
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     player.getNetworkingEngine().registerRequestFilter((_type: any, request: any) => {
       const url: string = request.uris[0];
-      if (CORS_BLOCKED.some((h) => url.includes(h))) {
+      if (isSunnxtCdnUrl(url)) {
         request.uris[0] = `/api/stream-proxy?url=${encodeURIComponent(url)}`;
       }
     });

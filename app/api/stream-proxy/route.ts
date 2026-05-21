@@ -5,6 +5,8 @@ import { DEFAULT_HEADERS } from "@/lib/api";
 const ALLOWED_HOSTS = [
   "livestream.sunnxt.com",
   "suntvvod1.sunnxt.com",
+  "sunnxt.com",        // matches *.sunnxt.com
+  "akamaized.net",     // checked together with suntvvod guard below
 ];
 
 // Inject a <BaseURL> into an MPD so Shaka resolves relative segment paths
@@ -66,7 +68,12 @@ export async function GET(request: NextRequest) {
     return new NextResponse("Invalid url", { status: 400 });
   }
 
-  if (!ALLOWED_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`))) {
+  const allowed =
+    ALLOWED_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`)) &&
+    // For akamaized.net, only allow SunNXT VOD subdomains (e.g. movies2-suntvvod.akamaized.net)
+    (hostname.endsWith(".akamaized.net") ? hostname.includes("suntvvod") : true);
+
+  if (!allowed) {
     return new NextResponse("Domain not allowed", { status: 403 });
   }
 
