@@ -37,6 +37,15 @@ function hasVideos(data: Record<string, unknown>): boolean {
   return (results?.[0]?.videos as { values?: unknown[] } | undefined)?.values?.length as unknown as boolean;
 }
 
+function getRoamingError(data: Record<string, unknown>): string | null {
+  const results = data.results as Array<Record<string, unknown>> | undefined;
+  const r0 = results?.[0];
+  if (r0?.blocked_reason || r0?.notify_type === "error_notify") {
+    return (r0.title as string) || (r0.p1 as string) || "Content blocked";
+  }
+  return null;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ contentId: string }> }
@@ -63,6 +72,20 @@ export async function GET(
       try { data = decrypt(raw.response as string); } catch { data = raw; }
     }
 
+    // Roaming/geo-block: SunNXT returns a special error notification object.
+    // Don't retry — a fresh session won't help; it's an IP-level restriction.
+    const roamingError = getRoamingError(data);
+    if (roamingError) {
+      const r0 = (data.results as Array<Record<string, unknown>>)[0];
+      return NextResponse.json({
+        code: 451,
+        error: "geo_blocked",
+        title: r0.title,
+        message: `${r0.p1 || ""} ${r0.p2 || ""}`.trim(),
+        blocked_reason: r0.blocked_reason,
+      }, { status: 451 });
+    }
+
     // SunNXT returns code:200 but empty videos when session is missing/expired.
     // Treat 0 videos the same as 401 — force a fresh login and retry once.
     const needsRetry =
@@ -83,6 +106,19 @@ export async function GET(
       data = raw;
       if (raw.response) {
         try { data = decrypt(raw.response as string); } catch { data = raw; }
+      }
+
+      // Check roaming error again after retry
+      const roamingError2 = getRoamingError(data);
+      if (roamingError2) {
+        const r0 = (data.results as Array<Record<string, unknown>>)[0];
+        return NextResponse.json({
+          code: 451,
+          error: "geo_blocked",
+          title: r0.title,
+          message: `${r0.p1 || ""} ${r0.p2 || ""}`.trim(),
+          blocked_reason: r0.blocked_reason,
+        }, { status: 451 });
       }
     }
 

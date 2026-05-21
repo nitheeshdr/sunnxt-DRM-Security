@@ -22,6 +22,7 @@ export default function PlayerPage({ params }: Props) {
   const [item, setItem] = useState<ContentItem | null>(null);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isGeoBlocked, setIsGeoBlocked] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const playerRef = useRef<any>(null);
@@ -61,6 +62,12 @@ export default function PlayerPage({ params }: Props) {
     try {
       const res = await fetch(`/api/media/${id}`);
       const data = await res.json();
+
+      if (data.error === "geo_blocked") {
+        setIsGeoBlocked(true);
+        setError(data.message || data.title || "This content is not available in your region.");
+        return;
+      }
 
       if (data.code !== 200 || !data.results?.[0]?.videos?.values?.length) {
         setError("Stream unavailable.");
@@ -234,14 +241,30 @@ export default function PlayerPage({ params }: Props) {
 
         {/* Error overlay */}
         {error && !mediaLoading && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/70">
-            <p className="text-yellow-400 text-sm text-center max-w-md px-4">{error}</p>
-            <button
-              onClick={() => loadAndPlay(contentId)}
-              className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-6 py-2 rounded transition-colors"
-            >
-              Retry
-            </button>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/80 px-6 text-center">
+            {isGeoBlocked ? (
+              <>
+                <div className="text-5xl">🌍</div>
+                <p className="text-white font-bold text-base sm:text-lg">International Roaming Expired</p>
+                <p className="text-gray-300 text-xs sm:text-sm max-w-sm leading-relaxed">{error}</p>
+                <button
+                  onClick={() => history.back()}
+                  className="mt-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium px-6 py-2 rounded transition-colors"
+                >
+                  Go Back
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-yellow-400 text-sm max-w-md">{error}</p>
+                <button
+                  onClick={() => loadAndPlay(contentId)}
+                  className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-6 py-2 rounded transition-colors"
+                >
+                  Retry
+                </button>
+              </>
+            )}
           </div>
         )}
 
