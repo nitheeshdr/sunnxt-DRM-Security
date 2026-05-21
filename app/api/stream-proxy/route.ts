@@ -2,11 +2,58 @@ import { type NextRequest, NextResponse } from "next/server";
 import { getSunnxtCookies } from "@/lib/sunnxt-session";
 import { DEFAULT_HEADERS } from "@/lib/api";
 
-// Domains that block CORS — must be proxied server-side
 const ALLOWED_HOSTS = [
   "livestream.sunnxt.com",
   "suntvvod1.sunnxt.com",
 ];
+
+// Inject a <BaseURL> into an MPD so Shaka resolves relative segment paths
+// against the original upstream domain.  The request filter in the player then
+// catches those resolved URLs (they contain the blocked domain) and re-routes
+// them through this proxy.  This is safer than rewriting SegmentTemplate
+// media= attributes because those contain $Number$/$Time$ tokens that Shaka
+// must expand itself.
+function rewriteMpd(xml: string, manifestUrl: string): string {
+  const baseDir = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+  const baseUrlTag = `<BaseURL>${baseDir}</BaseURL>`;
+
+  // Prefer to insert right after the opening <MPD …> tag.
+  // If no match (malformed MPD), prepend the tag at the top.
+  if (/<MPD[^>]*>/.test(xml)) {
+    return xml.replace(/(<MPD[^>]*>)/, `$1\n  ${baseUrlTag}`);
+  }
+  return `${baseUrlTag}\n${xml}`;
+}
+
+// Rewrite an HLS manifest: make every URI / segment line absolute+proxied.
+// HLS doesn't have a template-variable system so full rewriting is safe.
+function rewriteM3u8(text: string, manifestUrl: string): string {
+  const baseDir = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+
+  function resolveAndProxy(href: string): string {
+    try {
+      // Already absolute
+      const abs = new URL(href).href;
+      return `/api/stream-proxy?url=${encodeURIComponent(abs)}`;
+    } catch {
+      return `/api/stream-proxy?url=${encodeURIComponent(new URL(href, baseDir).href)}`;
+    }
+  }
+
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#") && trimmed.includes('URI="')) {
+        return line.replace(/URI="([^"]+)"/g, (_, val) => `URI="${resolveAndProxy(val)}"`);
+      }
+      if (trimmed && !trimmed.startsWith("#")) {
+        return resolveAndProxy(trimmed);
+      }
+      return line;
+    })
+    .join("\n");
+}
 
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
@@ -37,13 +84,50 @@ export async function GET(request: NextRequest) {
     }
 
     const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
-    // Stream the body directly — avoids buffering large video segments in memory
+    const cacheControl = upstream.headers.get("cache-control") ?? "no-cache";
+
+    const isMpd =
+      contentType.includes("dash+xml") ||
+      contentType.includes("mpd") ||
+      url.split("?")[0].endsWith(".mpd");
+
+    const isM3u8 =
+      contentType.includes("mpegurl") ||
+      url.split("?")[0].endsWith(".m3u8");
+
+    if (isMpd) {
+      const xml = await upstream.text();
+      const rewritten = rewriteMpd(xml, url);
+      return new NextResponse(rewritten, {
+        status: 200,
+        headers: {
+          "content-type": "application/dash+xml",
+          "access-control-allow-origin": "*",
+          "cache-control": cacheControl,
+        },
+      });
+    }
+
+    if (isM3u8) {
+      const text = await upstream.text();
+      const rewritten = rewriteM3u8(text, url);
+      return new NextResponse(rewritten, {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.apple.mpegurl",
+          "access-control-allow-origin": "*",
+          "cache-control": cacheControl,
+        },
+      });
+    }
+
+    // Binary video segments — stream directly without buffering
     return new NextResponse(upstream.body, {
       status: 200,
       headers: {
         "content-type": contentType,
         "access-control-allow-origin": "*",
-        "cache-control": upstream.headers.get("cache-control") ?? "no-cache",
+        "cache-control": cacheControl,
       },
     });
   } catch (e) {

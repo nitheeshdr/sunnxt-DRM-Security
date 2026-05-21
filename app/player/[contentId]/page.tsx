@@ -177,14 +177,14 @@ export default function PlayerPage({ params }: Props) {
       {/* Player area */}
       <div className="relative w-full bg-black" style={{ aspectRatio: "16/9", maxHeight: "80vh" }}>
         {/* Backdrop shown while loading */}
-        {backdropUrl && mediaLoading && (
+        {backdropUrl && (
           <Image
             src={backdropUrl}
             alt={title || "Content backdrop"}
             fill
             unoptimized
             priority
-            className="object-cover opacity-30"
+            className={`object-cover transition-opacity duration-500 ${mediaLoading ? "opacity-30" : "opacity-0"}`}
           />
         )}
 
@@ -293,10 +293,10 @@ export default function PlayerPage({ params }: Props) {
           <div className="mt-8">
             <h3 className="text-white font-bold text-base mb-4">Cast</h3>
             <div className="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-              {cast.slice(0, 12).map((member) => {
+              {cast.slice(0, 12).map((member, idx) => {
                 const castImg = getImageUrl(member.images, "squareimage", "hdpi");
                 return (
-                  <div key={member._id} className="shrink-0 text-center w-20">
+                  <div key={`${member._id}-${idx}`} className="shrink-0 text-center w-20">
                     <div className="relative w-16 h-16 mx-auto rounded-full overflow-hidden bg-gray-800 mb-2">
                       {castImg ? (
                         <Image src={castImg} alt={member.name} fill unoptimized className="object-cover" />
