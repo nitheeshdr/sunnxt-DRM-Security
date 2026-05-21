@@ -1,39 +1,39 @@
-import { Suspense } from "react";
-import { getLiveCarouselInfo } from "@/lib/api";
-import CarouselSection from "@/components/CarouselSection";
-import type { CarouselSection as CarouselSectionType } from "@/types";
+import { getLiveChannels } from "@/lib/api";
+import ContentCard from "@/components/ContentCard";
+import type { ContentItem } from "@/types";
 
 export const revalidate = 60;
 
 export default async function LivePage() {
-  let sections: CarouselSectionType[] = [];
+  let channels: ContentItem[] = [];
   try {
-    const res = await getLiveCarouselInfo();
-    sections = ((res as { results?: CarouselSectionType[] }).results || []) as CarouselSectionType[];
-    sections.sort((a, b) => (a.weightage || 0) - (b.weightage || 0));
+    const res = await getLiveChannels(60);
+    channels = ((res as { results?: ContentItem[] }).results || []) as ContentItem[];
   } catch (err) {
-    console.error("Failed to load live sections:", err);
+    console.error("Failed to load live channels:", err);
   }
-
-  const bannerIdx = sections.findIndex(
-    (s) => s.layoutType === "banner" || s.layoutType === "bannerV1"
-  );
 
   return (
     <div className="bg-[#0f0f0f] min-h-screen">
-      <div className="px-8 py-6 max-w-350 mx-auto">
-        <h1 className="text-2xl font-bold text-white mb-1">Live TV</h1>
-        <p className="text-gray-400 text-sm flex items-center gap-2">
+      <div className="px-4 sm:px-8 py-6 max-w-350 mx-auto">
+        <h1 className="text-xl sm:text-2xl font-bold text-white mb-1 flex items-center gap-2">
           <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse inline-block" />
-          Watch live channels streaming now
+          Live TV
+        </h1>
+        <p className="text-gray-400 text-xs sm:text-sm">
+          {channels.length > 0 ? `${channels.length} channels streaming now` : "Watch live channels"}
         </p>
       </div>
-      {sections.map((section, idx) => (
-        <Suspense key={section.name} fallback={<div className="h-64 skeleton rounded mx-8 mb-4" />}>
-          <CarouselSection section={section} isFirst={idx === bannerIdx} />
-        </Suspense>
-      ))}
-      {sections.length === 0 && (
+
+      {channels.length > 0 ? (
+        <div className="px-4 sm:px-8 max-w-350 mx-auto pb-10">
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2 sm:gap-3">
+            {channels.map((channel) => (
+              <ContentCard key={channel._id} item={channel} layout="portrait" size="sm" />
+            ))}
+          </div>
+        </div>
+      ) : (
         <div className="flex items-center justify-center h-64 text-gray-500">
           No live channels available right now.
         </div>

@@ -76,6 +76,12 @@ export async function getLiveCarouselInfo() {
   );
 }
 
+export async function getLiveChannels(count = 60) {
+  return fetchApi<{ code: number; results: unknown[] }>(
+    `/content/v2/carousel/liveChannels?&level=devicemax&startIndex=1&count=${count}&contentlang=${LANGUAGES}`
+  );
+}
+
 export async function getFreeCarouselInfo() {
   return fetchApi<{ code: number; results: unknown[] }>(
     `/content/v2/carousel/_info?group=portalComedies&language=${LANGUAGES}`

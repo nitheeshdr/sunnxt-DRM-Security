@@ -68,9 +68,12 @@ export default function PlayerPage({ params }: Props) {
       }
 
       const videos: VideoEntry[] = data.results[0].videos.values;
-      const dashVideo = videos.find((v) => v.format?.includes("dash"));
-      const hlsVideo = videos.find((v) => v.link?.includes(".m3u8"));
-      const chosen = dashVideo || hlsVideo || videos[0];
+      // Prefer unencrypted DASH (no DRM — works on all mobile browsers).
+      // Fall back to DRM-encrypted DASH, then HLS, then first available.
+      const clearDash = videos.find((v) => v.format === "dash" && !v.licenseUrl);
+      const cencDash = videos.find((v) => v.format?.includes("cenc") || (v.format?.includes("dash") && v.licenseUrl));
+      const hlsVideo = videos.find((v) => v.format?.includes("hls") || v.link?.includes(".m3u8"));
+      const chosen = clearDash || cencDash || hlsVideo || videos[0];
 
       if (!chosen) {
         setError("No playable stream found.");

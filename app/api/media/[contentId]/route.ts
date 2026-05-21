@@ -20,12 +20,28 @@ async function fetchMedia(contentId: string, cookieHeader: string) {
   });
 }
 
+function decrypt(response: string) {
+  const keyWA = CryptoJS.enc.Utf8.parse(MEDIA_KEY);
+  const iv = CryptoJS.enc.Hex.parse("00000000000000000000000000000000");
+  const bytes = CryptoJS.AES.decrypt(response, keyWA, {
+    iv,
+    mode: CryptoJS.mode.CBC,
+    padding: CryptoJS.pad.Pkcs7,
+  });
+  const hex = bytes.toString(CryptoJS.enc.Hex);
+  return JSON.parse(Buffer.from(hex, "hex").toString("utf8"));
+}
+
+function hasVideos(data: Record<string, unknown>): boolean {
+  const results = data.results as Array<Record<string, unknown>> | undefined;
+  return (results?.[0]?.videos as { values?: unknown[] } | undefined)?.values?.length as unknown as boolean;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ contentId: string }> }
 ) {
   const { contentId } = await params;
-  // Use the browser's cookie first; fall back to server-side session
   const browserCookie = request.headers.get("cookie") || "";
 
   let cookieHeader = browserCookie;
@@ -33,37 +49,40 @@ export async function GET(
     try {
       cookieHeader = await getSunnxtCookies();
     } catch {
-      // proceed without session — may still work for free content
+      // proceed without session
     }
   }
 
   try {
     let res = await fetchMedia(contentId, cookieHeader);
-    let data = await res.json();
+    let raw = await res.json() as Record<string, unknown>;
 
-    // If unauthenticated response, try with a fresh login
-    if (data.code === 401 || data.code === 403) {
-      invalidateSession();
-      cookieHeader = await getSunnxtCookies();
-      res = await fetchMedia(contentId, cookieHeader);
-      data = await res.json();
+    // Decrypt if encrypted
+    let data: Record<string, unknown> = raw;
+    if (raw.response) {
+      try { data = decrypt(raw.response as string); } catch { data = raw; }
     }
 
-    if (data.response) {
+    // SunNXT returns code:200 but empty videos when session is missing/expired.
+    // Treat 0 videos the same as 401 — force a fresh login and retry once.
+    const needsRetry =
+      data.code === 401 ||
+      data.code === 403 ||
+      (data.code === 200 && !hasVideos(data));
+
+    if (needsRetry) {
+      invalidateSession();
       try {
-        const keyWA = CryptoJS.enc.Utf8.parse(MEDIA_KEY);
-        const iv = CryptoJS.enc.Hex.parse("00000000000000000000000000000000");
-        const bytes = CryptoJS.AES.decrypt(data.response, keyWA, {
-          iv,
-          mode: CryptoJS.mode.CBC,
-          padding: CryptoJS.pad.Pkcs7,
-        });
-        const hex = bytes.toString(CryptoJS.enc.Hex);
-        const decrypted = Buffer.from(hex, "hex").toString("utf8");
-        const parsed = JSON.parse(decrypted);
-        return NextResponse.json(parsed);
-      } catch {
-        return NextResponse.json(data);
+        cookieHeader = await getSunnxtCookies();
+      } catch (e) {
+        console.error("Re-login failed:", e);
+        return NextResponse.json({ code: 401, error: "Session refresh failed" }, { status: 401 });
+      }
+      res = await fetchMedia(contentId, cookieHeader);
+      raw = await res.json() as Record<string, unknown>;
+      data = raw;
+      if (raw.response) {
+        try { data = decrypt(raw.response as string); } catch { data = raw; }
       }
     }
 
