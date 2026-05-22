@@ -1,14 +1,18 @@
 import { type NextRequest, NextResponse } from "next/server";
 import CryptoJS from "crypto-js";
 import { getSunnxtCookies, invalidateSession, forceRelogin } from "@/lib/sunnxt-session";
+import {
+  extractAndCacheHdntl,
+  learnUuidsFromEntries,
+  buildBypassEntries,
+  type VideoEntry,
+} from "@/lib/cdn-bypass";
 
 const FIELDS = "contents,user/currentdata,images,generalInfo,subtitles,relatedCast,globalServiceName,globalServiceId,relatedMedia,videos,thumbnailSeekPreview";
 const MEDIA_KEY = "A3s68aORSgHs$71P";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 async function fetchMedia(contentId: string, cookieHeader: string) {
-  // bw=5000000 (5 Mbps) and nid=4 (WiFi) tell SunNXT to return HD/HQ CDN
-  // URLs instead of the default SD (q=4) which often has no file on Akamai.
   const url = `https://www.sunnxt.com/next/api/media/${contentId}?playbackCounter=1&fields=${FIELDS}&bw=5000000&nid=4`;
   return fetch(url, {
     headers: {
@@ -23,9 +27,6 @@ async function fetchMedia(contentId: string, cookieHeader: string) {
   });
 }
 
-// Fallback: call pwaapi contentDetail directly with videos in fields.
-// This endpoint bypasses the subscription gate in www.sunnxt.com/next/api/media/
-// and may return stream URLs for content the media API rejects with "subscribe".
 async function fetchMediaViaContentDetail(contentId: string, cookieHeader: string) {
   const fields = "contents,user/currentdata,images,generalInfo,subtitles,relatedCast,globalServiceName,globalServiceId,relatedMedia,videos,thumbnailSeekPreview";
   const url = `https://pwaapi.sunnxt.com/content/v3/contentDetail/${contentId}/?level=devicemax&fields=${fields}&bw=5000000&nid=4&playbackCounter=1`;
@@ -58,7 +59,7 @@ function decrypt(response: string) {
 
 function hasVideos(data: Record<string, unknown>): boolean {
   const results = data.results as Array<Record<string, unknown>> | undefined;
-  return (results?.[0]?.videos as { values?: unknown[] } | undefined)?.values?.length as unknown as boolean;
+  return !!(results?.[0]?.videos as { values?: unknown[] } | undefined)?.values?.length;
 }
 
 function getVideosError(data: Record<string, unknown>): string | null {
@@ -70,13 +71,11 @@ function getVideosError(data: Record<string, unknown>): string | null {
   return null;
 }
 
-// Resolve relative stream URLs and propagate licenseUrl to Widevine DASH entries.
 function normalizeVideos(data: Record<string, unknown>): void {
   const results = data.results as Array<Record<string, unknown>> | undefined;
   const videos = results?.[0]?.videos as { values?: Array<Record<string, unknown>> } | undefined;
   if (!videos?.values) return;
 
-  // Fix relative link URLs (hlsaes entries arrive without scheme+host)
   videos.values = videos.values.map((v) => {
     const link = v.link as string | undefined;
     if (link && !link.startsWith("http") && !link.startsWith("/")) {
@@ -84,7 +83,6 @@ function normalizeVideos(data: Record<string, unknown>): void {
     }
     return v;
   });
-
 }
 
 function getRoamingError(data: Record<string, unknown>): string | null {
@@ -94,6 +92,29 @@ function getRoamingError(data: Record<string, unknown>): string | null {
     return (r0.title as string) || (r0.p1 as string) || "Content blocked";
   }
   return null;
+}
+
+/** After a successful media response, harvest hdntl + learn UUIDs for future bypass use. */
+function harvestBypassData(contentId: string, data: Record<string, unknown>): void {
+  const results = data.results as Array<Record<string, unknown>> | undefined;
+  const vals = (results?.[0]?.videos as { values?: VideoEntry[] } | undefined)?.values;
+  if (!vals?.length) return;
+  extractAndCacheHdntl(vals);
+  learnUuidsFromEntries(contentId, vals);
+}
+
+/** Build a minimal API-shaped response wrapping bypass video entries. */
+function buildBypassResponse(
+  contentId: string,
+  entries: VideoEntry[],
+  originalData: Record<string, unknown>
+): Record<string, unknown> {
+  // Graft bypass entries onto the original metadata (title, images, etc.)
+  // so the player page can show content info alongside the stream.
+  const results = (originalData.results as Array<Record<string, unknown>> | undefined) ?? [];
+  const r0: Record<string, unknown> = results[0] ? { ...results[0] } : { _id: contentId };
+  r0.videos = { values: entries };
+  return { ...originalData, code: 200, results: [r0] };
 }
 
 export async function GET(
@@ -109,33 +130,60 @@ export async function GET(
     try {
       cookieHeader = await getSunnxtCookies();
     } catch {
-      // No server credentials configured — user must be logged in via the login page
+      // No server credentials — user must be logged in via the login page
     }
   }
 
-  // No session at all — tell the player to prompt login rather than loop retries
+  // No session at all — tell the player to prompt login
   const hasSession = cookieHeader.includes("sessionid");
   if (!hasSession) {
-    return NextResponse.json({ code: 401, error: "login_required", message: "Please log in to watch this content." }, { status: 401 });
+    return NextResponse.json(
+      { code: 401, error: "login_required", message: "Please log in to watch this content." },
+      { status: 401 }
+    );
   }
 
   try {
     let res = await fetchMedia(contentId, cookieHeader);
     let raw = await res.json() as Record<string, unknown>;
 
-    // Decrypt if encrypted
     let data: Record<string, unknown> = raw;
     if (raw.response) {
       try { data = decrypt(raw.response as string); } catch { data = raw; }
     }
 
-    // If videos is an error object (not a values array), attempt the pwaapi
-    // contentDetail bypass before giving up.  The www.sunnxt.com/next/api/media/
-    // endpoint enforces subscription in the Next.js layer; calling pwaapi directly
-    // may return stream URLs without that check.
     const videosErr = getVideosError(data);
     if (videosErr) {
-      console.log(`media/${contentId}: subscription gate hit, trying pwaapi contentDetail bypass`);
+      console.log(`media/${contentId}: browser session blocked (${videosErr})`);
+
+      // --- Bypass attempt 1: retry with server subscribed credentials ---
+      // When the browser's unsubscribed session hits the paywall, fall back to
+      // the server's .env credentials which have a valid subscription.
+      // This makes all content accessible to any logged-in browser user.
+      if (process.env.SUNNXT_USERID) {
+        try {
+          const serverCookie = await getSunnxtCookies();
+          if (serverCookie !== cookieHeader) {
+            console.log(`media/${contentId}: retrying with server subscribed session`);
+            const serverRes = await fetchMedia(contentId, serverCookie);
+            const serverRaw = await serverRes.json() as Record<string, unknown>;
+            let serverData: Record<string, unknown> = serverRaw;
+            if (serverRaw.response) {
+              try { serverData = decrypt(serverRaw.response as string); } catch { serverData = serverRaw; }
+            }
+            if (hasVideos(serverData)) {
+              console.log(`media/${contentId}: server session bypass succeeded`);
+              harvestBypassData(contentId, serverData);
+              normalizeVideos(serverData);
+              return NextResponse.json(serverData);
+            }
+          }
+        } catch (e) {
+          console.warn(`media/${contentId}: server session retry failed:`, e);
+        }
+      }
+
+      // --- Bypass attempt 2: pwaapi contentDetail ---
       try {
         const bypassRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
         const bypassRaw = await bypassRes.json() as Record<string, unknown>;
@@ -144,22 +192,33 @@ export async function GET(
           try { bypassData = decrypt(bypassRaw.response as string); } catch { bypassData = bypassRaw; }
         }
         if (hasVideos(bypassData)) {
-          console.log(`media/${contentId}: bypass succeeded via contentDetail`);
+          console.log(`media/${contentId}: pwaapi contentDetail bypass succeeded`);
+          harvestBypassData(contentId, bypassData);
           normalizeVideos(bypassData);
           return NextResponse.json(bypassData);
         }
-        const bypassErr = getVideosError(bypassData);
-        console.log(`media/${contentId}: bypass returned:`, bypassErr || bypassData.code);
       } catch (e) {
-        console.error(`media/${contentId}: bypass attempt failed:`, e);
+        console.warn(`media/${contentId}: contentDetail bypass error:`, e);
       }
-      return NextResponse.json({ code: 404, error: "video_unavailable", message: videosErr }, { status: 404 });
+
+      // --- Bypass attempt 3: CDN UUID + hdntl wildcard token ---
+      // Uses the content UUID from the database + a cached Akamai hdntl token
+      // (acl=/*, 24h TTL) harvested from a previous successful media call.
+      // DRM license via pwaapi modularLicense — no subscription check (VULN-11).
+      const bypassEntries = buildBypassEntries(contentId);
+      if (bypassEntries) {
+        console.log(`media/${contentId}: CDN UUID+hdntl bypass succeeded`);
+        const bypassResponse = buildBypassResponse(contentId, bypassEntries, data);
+        return NextResponse.json(bypassResponse);
+      }
+
+      console.log(`media/${contentId}: all bypass attempts exhausted`);
+      return NextResponse.json(
+        { code: 404, error: "video_unavailable", message: videosErr },
+        { status: 404 }
+      );
     }
 
-    // Roaming/stale-session check.
-    // If roaming error: do a full logout+login so SunNXT re-evaluates the
-    // current (Indian) IP and clears the roaming flag.
-    // Otherwise (401/403/empty-videos): just invalidate cache and re-login.
     const isRoaming = getRoamingError(data) !== null;
     const needsRetry =
       isRoaming ||
@@ -169,7 +228,9 @@ export async function GET(
 
     if (needsRetry) {
       try {
-        cookieHeader = isRoaming ? await forceRelogin() : await (invalidateSession(), getSunnxtCookies());
+        cookieHeader = isRoaming
+          ? await forceRelogin()
+          : await (invalidateSession(), getSunnxtCookies());
       } catch (e) {
         console.error("Re-login failed:", e);
         return NextResponse.json({ code: 401, error: "Session refresh failed" }, { status: 401 });
@@ -181,7 +242,6 @@ export async function GET(
         try { data = decrypt(raw.response as string); } catch { data = raw; }
       }
 
-      // If still roaming-blocked after fresh login, account needs attention
       const roamingError2 = getRoamingError(data);
       if (roamingError2) {
         const r0 = (data.results as Array<Record<string, unknown>>)[0];
@@ -195,6 +255,9 @@ export async function GET(
       }
     }
 
+    // Harvest bypass data from every successful response so future
+    // subscription-locked requests can reuse the hdntl + learned UUIDs.
+    harvestBypassData(contentId, data);
     normalizeVideos(data);
     return NextResponse.json(data);
   } catch {

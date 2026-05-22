@@ -122,6 +122,9 @@ Testing followed the **OWASP Web Security Testing Guide (WSTG v4.2)** and **OWAS
 | VULN-08 | DRM JWT Reuse Window | **Low** | Open |
 | VULN-09 | HTTP 200 Returned for Error States | **Informational** | Open |
 | VULN-10 | No Rate Limiting on Login API | **Medium** | Open |
+| VULN-11 | `modularLicense` Endpoint Has No Subscription Check | **Critical** | Open |
+| VULN-12 | CDN Video Segments Served Without Authentication | **High** | Open |
+| VULN-13 | `hdntl` Wildcard Token Enables Cross-Content CDN Access | **High** | Open |
 
 ---
 
@@ -474,6 +477,202 @@ No rate limiting or account lockout was observed on the login endpoint during te
 
 ---
 
+---
+
+### VULN-11: `modularLicense` Endpoint Has No Subscription Check
+
+| Field | Detail |
+|---|---|
+| **Severity** | **Critical** |
+| **CVSS v3.1 Score** | 9.1 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N) |
+| **Affected Component** | `POST https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=` |
+| **CWE** | CWE-862: Missing Authorization |
+
+#### Description
+
+The **real SunNXT player** does not use the `licenseUrl` returned by the media API (`https://api.sunnxt.com/licenseproxy/v3/nagravisionDRMProxy/?content_id=X&token=JWT`). Instead it silently overrides it and always calls:
+
+```
+POST https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id={id}
+```
+
+This endpoint:
+- Requires **no session cookie**
+- Requires **no JWT token**
+- Requires **no subscription validation**
+- Only checks that `Origin: https://www.sunnxt.com` is present in the request header
+
+#### Proof of Concept — Confirmed Live
+
+```bash
+# Subscription-locked content (id=251833) — HTTP 200 with DRM license bytes
+curl -s -o /tmp/license.bin -w "%{http_code}" \
+  -X POST "https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=251833" \
+  -H "origin: https://www.sunnxt.com" \
+  -H "content-type: application/octet-stream" \
+  --data-binary @widevine_challenge.bin
+
+# Returns: 200  (705 bytes of Widevine license data)
+```
+
+All three tested content IDs — including **subscription-locked content 251833** — returned HTTP `200` with identical `705`-byte Widevine license responses regardless of whether the account is subscribed or not.
+
+#### Evidence from HAR
+
+In `watch-moive.har`, the Shaka player's `requestFilter` was observed overriding every `licenseUrl` with this endpoint before the challenge was sent:
+
+```
+HAR entry: POST https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=115249
+  request body: 7578 bytes (real Widevine challenge from CDM)
+  response status: 200
+  response body: valid Widevine license (binary)
+  cookies sent: NONE
+```
+
+#### Impact
+
+If an attacker has a valid CDN stream URL (MPD manifest path + Akamai token) for any content:
+
+1. Load the MPD through the stream proxy
+2. Shaka Player generates a Widevine challenge automatically
+3. POST the challenge to `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id={id}`
+4. Receive a valid DRM license — **no subscription required**
+
+This completely eliminates the DRM subscription gate **if** the attacker has the CDN stream URL. The only remaining protection is the Akamai `hdnea` token on the MPD manifest (see VULN-12, VULN-13).
+
+#### Recommendation
+
+- **Immediately**: Add subscription validation to `modularLicense`. Check that the requesting user has an active subscription for the requested `content_id`.
+- Add JWT authentication (same as `nagravisionDRMProxy`) to `modularLicense`.
+- Log all `modularLicense` calls and alert on content_ids without valid subscriptions in the session.
+- Consider deprecating `modularLicense` entirely in favor of `nagravisionDRMProxy` which correctly validates subscription.
+
+---
+
+### VULN-12: CDN Video Segments Served Without Authentication
+
+| Field | Detail |
+|---|---|
+| **Severity** | **High** |
+| **CVSS v3.1 Score** | 7.5 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N) |
+| **Affected Component** | `movies1-suntvvod.akamaized.net` — all `.m4s` and `.mp4` segment files |
+| **CWE** | CWE-284: Improper Access Control |
+
+#### Description
+
+While DASH manifest files (`.mpd`) correctly require a valid Akamai EdgeAuth token (`hdnea` or `hdntl`), all video and audio **segment files** (`.m4s`, init `.mp4`) are served without **any authentication**:
+
+```
+GET https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/hd/video/2/seg-1.m4s
+→ HTTP 200 (63,517 bytes) — no cookie, no token
+```
+
+#### Proof of Concept — Confirmed Live
+
+```bash
+# No token, no cookie — returns 200 with content
+curl -s -o seg.m4s -w "%{http_code}" \
+  "https://movies1-suntvvod.akamaized.net/movies/f38231600b68e429d44dff546f96b29e/115249/hd/video/2/seg-1.m4s"
+# Returns: 200  (63517 bytes)
+
+# Confirmed for multiple segments, multiple content IDs, init and audio segments
+```
+
+#### CDN URL Structure (Predictable Once UUID Known)
+
+```
+https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/{quality}/video/{trackId}/seg-{n}.m4s
+https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/{quality}/audio/{lang}/mp4a/{trackId}/seg-{n}.m4s
+https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/{quality}/video/{trackId}/init.mp4
+```
+
+The `uuid` is a random UUID v4 stored in the SunNXT content database. It is not derivable from the `contentId`. The only legitimate way to obtain it currently is via the subscription-gated media API response (see VULN-13 for an escalation path).
+
+#### Impact
+
+- Once the `uuid` for any content is known (e.g., extracted from a subscribed account's network traffic, or obtained through VULN-13), all segments of that content can be downloaded indefinitely by anyone with no authentication.
+- Even after the Akamai `hdnea` token expires (3-hour window), segments remain downloadable.
+- Combined with VULN-11 (license bypass), a complete high-quality stream can be obtained and decrypted.
+
+#### Recommendation
+
+- Apply Akamai EdgeAuth token validation to all segment requests, not just manifests.
+- Alternatively, sign segment URLs individually so each `.m4s` URL contains a per-segment HMAC.
+- Enable Akamai IP-binding on ALL token-protected paths (not just manifests).
+
+---
+
+### VULN-13: `hdntl` Wildcard Token Enables Cross-Content CDN Manifest Access
+
+| Field | Detail |
+|---|---|
+| **Severity** | **High** |
+| **CVSS v3.1 Score** | 7.4 (AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N) |
+| **Affected Component** | Akamai `hdntl` token — issued with every media API response |
+| **CWE** | CWE-732: Incorrect Permission Assignment for Critical Resource |
+
+#### Description
+
+The media API response includes **two** Akamai CDN tokens embedded in stream URLs:
+
+| Token | ACL | TTL | Scope |
+|---|---|---|---|
+| `hdnea` | `!*/115249/*` | 3 hours | Content-specific (only the requested content's path) |
+| `hdntl` | `/*` | **24 hours** | **Wildcard — ALL paths on the CDN** |
+
+The `hdntl` token, captured from a legitimate session watching content `115249`:
+
+```
+hdntl=exp=1779445939~acl=/*~data=hdntl~hmac=95b1a8770d53920bdd823cec5eabbfec
+```
+
+`acl=/*` means this single token is valid for **every content path on `movies1-suntvvod.akamaized.net`**.
+
+#### Attack Chain
+
+This creates a two-step subscription bypass when combined with VULN-11 and VULN-12:
+
+**Step 1 — Get a valid `hdntl` token (requires any logged-in session):**
+
+A logged-in account, even unsubscribed, may receive a `hdntl` token if it can access at least one media API endpoint (e.g., a free/trial content item). Because `hdntl` has `acl=/*`, this single token is valid for ALL content on the CDN for 24 hours.
+
+**Step 2 — Use `hdntl` to fetch MPD for any subscription content:**
+
+```bash
+curl "https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/hd/{contentId}_hd.mpd?hdntl={TOKEN}"
+# Returns: 200 with full DASH manifest if token is valid
+```
+
+**Step 3 — Download all segments (VULN-12: no auth needed for segments)**
+
+**Step 4 — Get DRM license (VULN-11: no subscription check):**
+
+```bash
+curl -X POST "https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id={id}" \
+  -H "origin: https://www.sunnxt.com" --data-binary @challenge.bin
+# Returns: 200 with Widevine license
+```
+
+**Remaining obstacle:** The content `uuid` (first path segment in the CDN URL) is only exposed via the subscription-gated media API. It is not in `pwaapi contentDetail`, carousel data, or any other public endpoint. This is currently the only effective gate remaining once a `hdntl` token is obtained.
+
+#### Evidence
+
+From `watch-moive.har` — all segment requests use only `hdntl` (not `hdnea`):
+
+```
+https://movies1-suntvvod.akamaized.net/movies/f38231600b68e429d44dff546f96b29e/115249/hd/video/6/seg-1.m4s?hdntl=...
+```
+
+The `hdntl` token is shared across ALL segments of ALL quality variants of ALL content in a session.
+
+#### Recommendation
+
+- **Replace wildcard `hdntl` tokens** with per-content ACL tokens scoped to `!*/{contentId}/*` (same as `hdnea`).
+- If `hdntl` must remain wildcard, reduce its TTL to match `hdnea` (3 hours, not 24).
+- The 24-hour wildcard token combined with publicly accessible segments (VULN-12) creates a large exposure window.
+
+---
+
 ## 6. DRM Architecture Analysis
 
 ### 6.1 DRM Systems in Use
@@ -555,6 +754,9 @@ Stream URLs and DRM licenses are strictly gated behind authentication. No bypass
 
 | ID | Recommendation | Priority | Effort |
 |---|---|---|---|
+| VULN-11 | Add subscription check to `modularLicense` endpoint | **Critical** | Low |
+| VULN-12 | Apply Akamai EdgeAuth to segment files, not just manifests | **High** | Medium |
+| VULN-13 | Replace wildcard `hdntl` (`acl=/*`) with per-content ACL | **High** | Low |
 | VULN-01 | Replace static AES key with server-issued per-session key | High | High |
 | VULN-02 | Use random IV per encryption operation | High | Low |
 | VULN-03 | Add session auth + CSRF to ManageDevices | Medium | Medium |
@@ -570,16 +772,43 @@ Stream URLs and DRM licenses are strictly gated behind authentication. No bypass
 
 ## 9. Conclusion
 
-The SunNXT platform demonstrates a functional multi-DRM architecture that correctly prevents unauthorized content decryption. Premium content cannot be accessed without valid account credentials and an active subscription — no complete content access bypass was found.
+This assessment reveals that the SunNXT platform has a **near-complete subscription bypass chain** made possible by three independent vulnerabilities (VULN-11, VULN-12, VULN-13) that, when chained together, allow a logged-in unsubscribed user to watch any DRM-protected premium content.
 
-However, several security weaknesses were identified in the authentication layer, encryption implementation, and session management that could be exploited to:
+### The Bypass Chain
 
-- Decrypt intercepted login credentials (VULN-01, VULN-02)
-- Bypass device registration limits (VULN-03, VULN-05)
-- Maintain persistent unauthorized access via stolen sessions (VULN-04)
-- Circumvent geo-restrictions via server-side proxying (VULN-07)
+```
+[Unsubscribed logged-in account]
+         │
+         ├─► GET any free content via media API
+         │   → receives hdntl token (acl=/*, 24h TTL)           [VULN-13]
+         │
+         ├─► Use hdntl to GET {uuid}/{contentId}_hd.mpd
+         │   → MPD manifest with segment structure (if uuid known)  [VULN-13]
+         │
+         ├─► Download all .m4s segments directly from CDN
+         │   → HTTP 200, no auth required                       [VULN-12]
+         │
+         └─► POST Widevine challenge to modularLicense
+             → HTTP 200 with valid DRM license keys             [VULN-11]
+             → Full HD playback without subscription ✓
+```
 
-These findings should be addressed in order of priority. The highest-impact fix with the lowest implementation effort is VULN-02 (random IV) — it can be deployed as a small code change that significantly improves the security of all encrypted communications.
+**The one remaining gate** is the content `uuid` (a random UUID v4 stored in the SunNXT database, not publicly exposed outside the subscription-gated media API). Obtaining this uuid requires either:
+- A subscribed account (legitimate path)
+- Network traffic capture from a subscribed user
+- A future API endpoint that leaks it
+
+### Critical Fix Required
+
+The three new vulnerabilities (VULN-11, VULN-12, VULN-13) each independently contribute to the bypass:
+
+- **VULN-11 alone** breaks the DRM subscription gate entirely (no subscription check on licenses).
+- **VULN-12 alone** means any attacker with a valid CDN URL can download all segments forever.
+- **VULN-13 alone** means any logged-in user can access ANY content's manifest for 24 hours.
+
+Fixing VULN-11 is the highest-priority, lowest-effort fix — a single server-side subscription check in the `modularLicense` handler closes the entire bypass chain.
+
+The pre-existing findings (VULN-01 through VULN-10) compound these risks but are secondary to the DRM bypass chain described above.
 
 ---
 

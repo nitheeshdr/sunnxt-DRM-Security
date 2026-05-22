@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SunNXT Clone — API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f0f;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    /* Top banner */
+    .banner {
+      background: linear-gradient(135deg, #c0392b 0%, #922b21 100%);
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+    }
+
+    .banner-logo {
+      width: 40px;
+      height: 40px;
+      background: #fff;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      font-weight: 900;
+      color: #c0392b;
+      flex-shrink: 0;
+    }
+
+    .banner-text h1 {
+      color: #fff;
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .banner-text p {
+      color: rgba(255,255,255,0.75);
+      font-size: 13px;
+      margin-top: 2px;
+    }
+
+    .banner-badge {
+      margin-left: auto;
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.25);
+    }
+
+    /* Override Swagger UI background */
+    #swagger-ui {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 24px 16px 48px;
+    }
+
+    .swagger-ui .info { margin: 20px 0 8px; }
+    .swagger-ui .info .title { color: #fff; font-size: 28px; }
+    .swagger-ui .info .description p { color: #aaa; }
+    .swagger-ui .info a { color: #e74c3c; }
+
+    .swagger-ui .scheme-container {
+      background: #1a1a1a;
+      box-shadow: none;
+      border-bottom: 1px solid #333;
+    }
+
+    /* Topbar hidden — we have our own banner */
+    .swagger-ui .topbar { display: none; }
+
+    .swagger-ui .opblock-tag {
+      border-bottom: 1px solid #2a2a2a;
+      color: #eee;
+    }
+
+    .swagger-ui .opblock {
+      border: 1px solid #2a2a2a;
+      background: #1a1a1a;
+      box-shadow: none;
+      margin-bottom: 8px;
+    }
+
+    .swagger-ui .opblock .opblock-summary {
+      border-bottom: 1px solid #2a2a2a;
+    }
+
+    .swagger-ui .opblock .opblock-summary-description {
+      color: #bbb;
+    }
+
+    .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #1a6b9a; }
+    .swagger-ui .opblock.opblock-post .opblock-summary-method { background: #2e7d32; }
+    .swagger-ui .opblock.opblock-get { border-color: #1a6b9a33; background: #0d1f2d; }
+    .swagger-ui .opblock.opblock-post { border-color: #2e7d3233; background: #0d1a0e; }
+
+    .swagger-ui section.models { border: 1px solid #2a2a2a; background: #1a1a1a; }
+    .swagger-ui section.models h4 { color: #eee; }
+    .swagger-ui .model-title { color: #ddd; }
+    .swagger-ui .model { color: #ccc; }
+
+    .swagger-ui .btn.execute {
+      background: #c0392b;
+      border-color: #c0392b;
+      color: #fff;
+    }
+
+    .swagger-ui .btn.execute:hover {
+      background: #a93226;
+      border-color: #a93226;
+    }
+
+    .swagger-ui select, .swagger-ui input[type=text], .swagger-ui textarea {
+      background: #111;
+      border: 1px solid #444;
+      color: #eee;
+    }
+
+    .swagger-ui .response-col_status { color: #eee; }
+    .swagger-ui .responses-table .response-col_description { color: #ccc; }
+
+    .swagger-ui .parameter__name { color: #e0e0e0; }
+    .swagger-ui .parameter__type { color: #7fc3e8; }
+    .swagger-ui .parameter__in { color: #aaa; }
+
+    .swagger-ui .tab li { color: #bbb; }
+    .swagger-ui .tab li.active { color: #fff; }
+
+    .swagger-ui table.headers td, .swagger-ui table.headers th { color: #ccc; }
+
+    .swagger-ui .highlight-code > .microlight { background: #111 !important; }
+    .swagger-ui .renderedMarkdown p { color: #bbb; }
+    .swagger-ui .renderedMarkdown code { background: #222; color: #f0c36d; }
+
+    .swagger-ui .opblock-description-wrapper p,
+    .swagger-ui .opblock-external-docs-wrapper p,
+    .swagger-ui .opblock-title_normal p { color: #bbb; }
+  </style>
+</head>
+<body>
+
+  <div class="banner">
+    <div class="banner-logo">S</div>
+    <div class="banner-text">
+      <h1>SunNXT Clone — API Reference</h1>
+      <p>Internal proxy API • Next.js Route Handlers</p>
+    </div>
+    <span class="banner-badge">OpenAPI 3.0</span>
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <script src="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function () {
+      const ui = SwaggerUIBundle({
+        url: window.location.origin + "/openapi.json",
+        dom_id: "#swagger-ui",
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset,
+        ],
+        layout: "StandaloneLayout",
+        deepLinking: true,
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 2,
+        displayRequestDuration: true,
+        filter: true,
+        tryItOutEnabled: true,
+        requestInterceptor: function (req) {
+          // For the license endpoint, Swagger UI can't send binary bodies well.
+          // Just note it in the console.
+          return req;
+        },
+      });
+      window.ui = ui;
+    };
+  </script>
+</body>
+</html>

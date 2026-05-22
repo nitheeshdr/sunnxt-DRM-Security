@@ -1,0 +1,775 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "SunNXT Clone — API Reference & Security Research",
+    "version": "2.0.0",
+    "description": "Internal proxy API for the SunNXT clone player, plus documentation of discovered SunNXT upstream API endpoints used for authorized security research.\n\n## Security Findings Summary\n\n| ID | Endpoint | Vulnerability | Severity |\n|---|---|---|---|\n| VULN-11 | `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` | No subscription check on DRM license | **Critical** |\n| VULN-12 | `movies1-suntvvod.akamaized.net/.../seg-N.m4s` | Segments served without any auth token | **High** |\n| VULN-13 | Akamai `hdntl` token | Wildcard `acl=/*` covers all content for 24h | **High** |\n| VULN-01 | Login API | Static AES key hardcoded in JS bundle | High |\n\nSee `SECURITY_REPORT.md` for the full report.",
+    "contact": {
+      "name": "SunNXT Clone — Security Research"
+    }
+  },
+  "servers": [
+    { "url": "http://localhost:3000", "description": "Local dev server" }
+  ],
+  "tags": [
+    { "name": "Auth", "description": "Login, logout, and session management" },
+    { "name": "Content", "description": "Content metadata and search" },
+    { "name": "Playback", "description": "Stream URLs, DRM licenses, and heartbeat" },
+    { "name": "Proxy", "description": "Raw CDN / subtitle proxying" },
+    { "name": "Security Research", "description": "⚠️ Discovered SunNXT upstream endpoints with security vulnerabilities. Documented for authorized security research and responsible disclosure to SunNXT." }
+  ],
+  "x-security-note": "All upstream SunNXT endpoints documented here were discovered via HAR analysis during authorized black-box security testing.",
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login with SunNXT credentials",
+        "description": "Authenticates the user against SunNXT. Tries the encrypted BFF endpoint first, then falls back to pwaapi direct endpoints. On success, sets a `sessionid` cookie.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Registered mobile number",
+                    "example": "9876543210"
+                  },
+                  "password": {
+                    "type": "string",
+                    "description": "Account password",
+                    "example": "mypassword"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful. `sessionid` cookie is set.",
+            "headers": {
+              "Set-Cookie": {
+                "description": "sessionid session cookie",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "data": { "type": "object", "description": "Raw SunNXT response payload" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing username or password",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Logout",
+        "description": "Calls the SunNXT logout endpoint and clears the local `sunnxt_session` cookie.",
+        "responses": {
+          "200": {
+            "description": "Logout successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Check account status by mobile number",
+        "description": "Queries SunNXT to check whether a mobile number has a registered account and what its subscription status is.",
+        "parameters": [
+          {
+            "name": "mobile",
+            "in": "query",
+            "required": true,
+            "description": "10-digit mobile number",
+            "schema": { "type": "string", "example": "9876543210" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account status data from SunNXT",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "description": "SunNXT account status payload" }
+              }
+            }
+          },
+          "400": {
+            "description": "Mobile number not provided",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/clear-session": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Force re-login using server credentials",
+        "description": "Invalidates the cached server-side SunNXT session and forces a fresh login using the `SUNNXT_USERID` / `SUNNXT_PASSWORD` environment variables. Useful after geo-block or stale cookie errors.",
+        "responses": {
+          "200": {
+            "description": "Session cleared and re-logged in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "message": { "type": "string", "example": "Session cleared and re-logged in" }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Re-login failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": false },
+                    "error": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/content/{contentId}": {
+      "get": {
+        "tags": ["Content"],
+        "summary": "Get content metadata",
+        "description": "Returns metadata for a piece of content: title, description, images, cast, genres, and subtitle tracks. Does not include stream URLs (see `/api/media/{contentId}`).",
+        "parameters": [
+          {
+            "name": "contentId",
+            "in": "path",
+            "required": true,
+            "description": "SunNXT numeric content ID",
+            "schema": { "type": "string", "example": "251833" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Content metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ContentResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Upstream error — returns empty results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": { "type": "array", "items": {}, "example": [] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "tags": ["Content"],
+        "summary": "Search content",
+        "description": "Full-text search across SunNXT's catalogue. Returns matching movies, series, and episodes.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query string",
+            "schema": { "type": "string", "example": "Vikram" }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Filter by content type (e.g. `movie`, `tvshow`)",
+            "schema": { "type": "string", "example": "movie" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/ContentItem" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trending": {
+      "get": {
+        "tags": ["Content"],
+        "summary": "Get trending search terms",
+        "description": "Returns the current trending search keywords from SunNXT's discovery endpoint.",
+        "responses": {
+          "200": {
+            "description": "Trending search terms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "title": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/{contentId}": {
+      "get": {
+        "tags": ["Playback"],
+        "summary": "Get stream URLs for a content ID",
+        "description": "Fetches the media API response for a content ID, returning stream URLs (DASH/HLS), license URLs, subtitle tracks, and related metadata. Handles AES-CBC response decryption, geo-block detection, session refresh, and falls back to `pwaapi` if the main endpoint returns a subscription error.",
+        "parameters": [
+          {
+            "name": "contentId",
+            "in": "path",
+            "required": true,
+            "description": "SunNXT numeric content ID",
+            "schema": { "type": "string", "example": "115249" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media data with stream URLs",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MediaResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Not logged in or session refresh failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": { "type": "integer", "example": 401 },
+                    "error": { "type": "string", "example": "login_required" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Content requires a subscription",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": { "type": "integer", "example": 404 },
+                    "error": { "type": "string", "example": "video_unavailable" },
+                    "message": { "type": "string", "example": "Please subscribe to watch the content" }
+                  }
+                }
+              }
+            }
+          },
+          "451": {
+            "description": "Geo-blocked — international roaming expired or IP not India",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": { "type": "integer", "example": 451 },
+                    "error": { "type": "string", "example": "geo_blocked" },
+                    "title": { "type": "string" },
+                    "message": { "type": "string" },
+                    "blocked_reason": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "sessionCookie": [] }]
+      }
+    },
+    "/api/license": {
+      "post": {
+        "tags": ["Playback"],
+        "summary": "DRM Widevine license proxy",
+        "description": "Proxies a Widevine license challenge (binary) to the SunNXT license server. First tries the `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` endpoint which has no subscription check. Falls back to the original license URL from the media API response if `pwaapi` returns a non-200.",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "description": "Original license URL from the media API response (e.g. `https://api.sunnxt.com/nagravision/...`)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "contentId",
+            "in": "query",
+            "required": false,
+            "description": "SunNXT content ID — used to build the `pwaapi` modularLicense URL. Comes from the player page URL.",
+            "schema": { "type": "string", "example": "115249" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw Widevine license challenge bytes from the CDM",
+          "content": {
+            "application/octet-stream": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "License bytes from the DRM server",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `url` query param",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "402": {
+            "description": "License server rejected the challenge (subscription required)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "500": {
+            "description": "Proxy error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream-proxy": {
+      "get": {
+        "tags": ["Proxy"],
+        "summary": "CORS proxy for SunNXT CDN URLs",
+        "description": "Proxies DASH (.mpd) and HLS (.m3u8) manifests and raw video segments from SunNXT CDN domains (`suntvvod1.sunnxt.com`, `*.akamaized.net` with suntvvod subdomain, etc.). For MPD files it injects `<BaseURL>` and optionally `<dashif:Laurl>` (Widevine license URL). For HLS manifests it rewrites all segment URIs to route through this proxy. Allowed domains are allowlisted.",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "description": "Full CDN URL to proxy",
+            "schema": { "type": "string", "example": "https://suntvvod1.sunnxt.com/.../.../251833_hd.mpd" }
+          },
+          {
+            "name": "licenseUrl",
+            "in": "query",
+            "required": false,
+            "description": "Absolute or relative license URL to inject as `<dashif:Laurl>` into Widevine MPDs. Fixes Shaka error 6012 (NO_LICENSE_SERVER_GIVEN) on Akamai streams.",
+            "schema": { "type": "string", "example": "/api/license?url=...&contentId=115249" }
+          },
+          {
+            "name": "stripDrm",
+            "in": "query",
+            "required": false,
+            "description": "If `true`, removes all `<ContentProtection>` elements from the MPD so Shaka never initiates a license request. Use for format=dash streams that carry clear segments.",
+            "schema": { "type": "string", "enum": ["true", "false"], "default": "false" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proxied content. Content-Type matches the upstream file (`application/dash+xml`, `application/vnd.apple.mpegurl`, or `application/octet-stream`).",
+            "content": {
+              "application/dash+xml": {
+                "schema": { "type": "string", "description": "Rewritten MPD XML" }
+              },
+              "application/vnd.apple.mpegurl": {
+                "schema": { "type": "string", "description": "Rewritten HLS playlist" }
+              },
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary", "description": "Video segment bytes" }
+              }
+            }
+          },
+          "400": { "description": "Missing or invalid `url` param" },
+          "403": { "description": "Domain not in the allowlist" },
+          "500": { "description": "Upstream fetch error" }
+        }
+      }
+    },
+    "/api/download": {
+      "get": {
+        "tags": ["Proxy"],
+        "summary": "Download proxy for subtitles and CDN files",
+        "description": "Proxies a file download (typically a VTT subtitle) from a SunNXT CDN URL. Adds `Content-Disposition: attachment` so the browser saves the file.",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "description": "CDN URL of the file to download",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "filename",
+            "in": "query",
+            "required": false,
+            "description": "Desired download filename",
+            "schema": { "type": "string", "default": "subtitle.vtt", "example": "episode1_tamil.vtt" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes with Content-Disposition attachment header",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "description": "Missing `url` param" },
+          "403": { "description": "Domain not in the allowlist" },
+          "500": { "description": "Download failed" }
+        }
+      }
+    },
+    "/api/heartbeat": {
+      "post": {
+        "tags": ["Playback"],
+        "summary": "Send playback heartbeat",
+        "description": "Notifies SunNXT that the user is actively watching content. Should be called every 30 seconds during playback with `action: Start`, and once on pause/end with `action: Stop`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["contentId"],
+                "properties": {
+                  "contentId": {
+                    "type": "string",
+                    "description": "SunNXT content ID currently playing",
+                    "example": "115249"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": ["Start", "Stop"],
+                    "default": "Start",
+                    "description": "`Start` = actively playing; `Stop` = paused or ended"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Heartbeat acknowledged",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "description": "Raw SunNXT heartbeat response" }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `contentId`",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        },
+        "security": [{ "sessionCookie": [] }]
+      }
+    },
+
+    "https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/": {
+      "post": {
+        "tags": ["Security Research"],
+        "summary": "⚠️ VULN-11: DRM license with NO subscription check (SunNXT upstream)",
+        "description": "**CRITICAL vulnerability** — This is the actual endpoint the real SunNXT player uses internally (discovered via HAR analysis). Unlike `api.sunnxt.com/nagravisionDRMProxy` which validates a JWT signed with a subscription token, this endpoint has **zero subscription check**. It grants a valid Widevine/PlayReady license to ANY caller who sends a valid CDM challenge and includes `Origin: https://www.sunnxt.com`.\n\n**Confirmed via live testing:** HTTP 200 returned for subscription-locked content `251833` with no session cookie, no JWT, no subscription.\n\n**Attack chain role:** Step 4 of the subscription bypass — receive DRM keys for any content once the stream URL is known.",
+        "externalDocs": {
+          "description": "SECURITY_REPORT.md — VULN-11",
+          "url": "http://localhost:3000/api-docs.html"
+        },
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "query",
+            "required": true,
+            "description": "SunNXT content ID. **No subscription validation is performed.** Any content_id returns HTTP 200 with a valid license.",
+            "schema": { "type": "string", "example": "251833" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw Widevine CDM challenge bytes (generated by browser CDM when Shaka loads an encrypted MPD)",
+          "content": {
+            "application/octet-stream": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "**Valid Widevine license — no subscription check performed.** Returns encrypted content keys for the CDM.",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          }
+        },
+        "servers": [{ "url": "https://pwaapi.sunnxt.com", "description": "SunNXT pwaapi (upstream, not proxied)" }]
+      }
+    },
+
+    "https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/{quality}/video/{trackId}/{segment}": {
+      "get": {
+        "tags": ["Security Research"],
+        "summary": "⚠️ VULN-12: CDN video segments accessible without any auth token",
+        "description": "**HIGH vulnerability** — All `.m4s` segment files and init `.mp4` fragments on `movies1-suntvvod.akamaized.net` return HTTP 200 with **no cookie, no `hdnea` token, no `hdntl` token**.\n\nOnly the MPD manifest (`.mpd`) requires a valid Akamai EdgeAuth `hdnea` or `hdntl` token. Once the manifest has been parsed, every segment URL in it is publicly accessible.\n\n**Confirmed via live testing:**\n```\ncurl https://movies1-suntvvod.akamaized.net/movies/f38231600b68e429d44dff546f96b29e/115249/hd/video/2/seg-1.m4s\n→ 200 OK (63,517 bytes)\n```\n\n**CDN URL pattern:**\n```\n/movies/{uuid}/{contentId}/{quality}/video/{trackId}/seg-{n}.m4s\n/movies/{uuid}/{contentId}/{quality}/audio/{lang}/mp4a/{trackId}/seg-{n}.m4s\n/movies/{uuid}/{contentId}/{quality}/video/{trackId}/init.mp4\n```\n\nThe `{uuid}` is a random UUID v4 (e.g. `f38231600b68e429d44dff546f96b29e`) — not derivable from `{contentId}`.",
+        "parameters": [
+          { "name": "uuid", "in": "path", "required": true, "description": "Internal UUID v4 (content-specific, only in media API response)", "schema": { "type": "string", "example": "f38231600b68e429d44dff546f96b29e" } },
+          { "name": "contentId", "in": "path", "required": true, "description": "SunNXT numeric content ID", "schema": { "type": "string", "example": "115249" } },
+          { "name": "quality", "in": "path", "required": true, "schema": { "type": "string", "enum": ["hd", "sd"], "example": "hd" } },
+          { "name": "trackId", "in": "path", "required": true, "description": "Track ID from MPD AdaptationSet (e.g. 2, 6, 8, 9)", "schema": { "type": "string", "example": "6" } },
+          { "name": "segment", "in": "path", "required": true, "description": "Segment filename, e.g. `seg-1.m4s`, `seg-932.m4s`, `init.mp4`", "schema": { "type": "string", "example": "seg-1.m4s" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "**Encrypted video/audio segment — no auth required.** Bytes are Widevine CENC encrypted but no token needed to download.",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "403": {
+            "description": "Token expired or invalid — only returned for MPD manifests, NOT for segments"
+          }
+        },
+        "servers": [{ "url": "https://movies1-suntvvod.akamaized.net", "description": "Akamai CDN (upstream, not proxied)" }]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sessionid",
+        "description": "SunNXT session cookie obtained from POST /api/auth/login"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      },
+      "ContentItem": {
+        "type": "object",
+        "properties": {
+          "_id": { "type": "string" },
+          "title": { "type": "string" },
+          "globalServiceName": { "type": "string" },
+          "releaseDate": { "type": "string", "format": "date" },
+          "generalInfo": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "type": { "type": "string", "example": "movie" },
+              "isDolby": { "type": "boolean" }
+            }
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "example": "poster" },
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "resolution": { "type": "string", "example": "xhdpi" },
+                      "link": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ContentResponse": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "integer", "example": 200 },
+          "results": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ContentItem" }
+          }
+        }
+      },
+      "VideoEntry": {
+        "type": "object",
+        "properties": {
+          "link": {
+            "type": "string",
+            "description": "Stream URL — DASH manifest (.mpd) or HLS playlist (.m3u8). May contain Akamai `hdnea` auth token.",
+            "example": "https://suntvvod1.sunnxt.com/.../251833_hd.mpd?hdnea=..."
+          },
+          "licenseUrl": {
+            "type": "string",
+            "description": "Widevine license server URL. Present only for DRM-protected streams.",
+            "example": "https://api.sunnxt.com/nagravision/license?content_id=115249"
+          },
+          "format": {
+            "type": "string",
+            "description": "Stream format identifier",
+            "enum": ["dash", "dash-cenc", "hls", "hlsaes", "hls-fp-aapl"],
+            "example": "dash"
+          },
+          "profile": { "type": "string", "example": "hd" },
+          "resolution": { "type": "string", "example": "1280x720" }
+        }
+      },
+      "MediaResponse": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "integer", "example": 200 },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "videos": {
+                  "type": "object",
+                  "properties": {
+                    "values": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/VideoEntry" }
+                    }
+                  }
+                },
+                "subtitles": {
+                  "type": "object",
+                  "properties": {
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "language": { "type": "string", "example": "Tamil" },
+                          "link": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
