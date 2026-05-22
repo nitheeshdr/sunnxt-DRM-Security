@@ -183,7 +183,20 @@ export async function GET(
         }
       }
 
-      // --- Bypass attempt 2: pwaapi contentDetail ---
+      // --- Bypass attempt 2: CDN UUID + hdntl wildcard token (synchronous, try first) ---
+      // Uses the content UUID from the database + a cached Akamai hdntl token
+      // (acl=/*, 24h TTL).  DRM via pwaapi modularLicense — no subscription check.
+      // Tried before the pwaapi HTTP call because it requires no network round-trip.
+      const bypassEntries = buildBypassEntries(contentId);
+      if (bypassEntries) {
+        console.log(`media/${contentId}: CDN UUID+hdntl bypass succeeded`);
+        const bypassResponse = buildBypassResponse(contentId, bypassEntries, data);
+        return NextResponse.json(bypassResponse);
+      }
+
+      // --- Bypass attempt 3: pwaapi contentDetail ---
+      // Fallback when UUID is not in the local DB.  Also populates the hdntl cache
+      // and UUID DB from the returned CDN URLs, enabling future bypass-2 calls.
       try {
         const bypassRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
         const bypassRaw = await bypassRes.json() as Record<string, unknown>;
@@ -199,17 +212,6 @@ export async function GET(
         }
       } catch (e) {
         console.warn(`media/${contentId}: contentDetail bypass error:`, e);
-      }
-
-      // --- Bypass attempt 3: CDN UUID + hdntl wildcard token ---
-      // Uses the content UUID from the database + a cached Akamai hdntl token
-      // (acl=/*, 24h TTL) harvested from a previous successful media call.
-      // DRM license via pwaapi modularLicense — no subscription check (VULN-11).
-      const bypassEntries = buildBypassEntries(contentId);
-      if (bypassEntries) {
-        console.log(`media/${contentId}: CDN UUID+hdntl bypass succeeded`);
-        const bypassResponse = buildBypassResponse(contentId, bypassEntries, data);
-        return NextResponse.json(bypassResponse);
       }
 
       console.log(`media/${contentId}: all bypass attempts exhausted`);
