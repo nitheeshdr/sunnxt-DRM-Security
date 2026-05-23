@@ -138,12 +138,47 @@ const UUID_DB: Record<string, CdnEntry> = {
   "8159": { uuid: "d2cc73f95e68d0aed87eaf003be12036", cdnBase: "https://movies1-suntvvod.akamaized.net/movies", hasQualitySubdir: true },
 };
 
+// ---------------------------------------------------------------------------
+// UUID_DB disk persistence — survives server restarts
+// ---------------------------------------------------------------------------
+const UUID_DB_FILE = join(tmpdir(), "sunnxt-uuid-db.json");
+
+function saveUuidDbToDisk(): void {
+  try {
+    writeFileSync(UUID_DB_FILE, JSON.stringify(UUID_DB), "utf8");
+  } catch { /* non-fatal */ }
+}
+
+function loadUuidDbFromDisk(): void {
+  try {
+    const raw = readFileSync(UUID_DB_FILE, "utf8");
+    const loaded = JSON.parse(raw) as Record<string, CdnEntry>;
+    let added = 0;
+    for (const [id, entry] of Object.entries(loaded)) {
+      if (!UUID_DB[id]) { UUID_DB[id] = entry; added++; }
+    }
+    if (added > 0) console.log(`cdn-bypass: loaded ${added} uuid entries from disk (total ${Object.keys(UUID_DB).length})`);
+  } catch { /* file doesn't exist yet */ }
+}
+
+// Merge disk entries on module load
+loadUuidDbFromDisk();
+
 function registerContentEntry(contentId: string, entry: CdnEntry): void {
   UUID_DB[contentId] = entry;
+  saveUuidDbToDisk();
 }
 
 function getContentEntry(contentId: string): CdnEntry | null {
   return UUID_DB[contentId] ?? null;
+}
+
+export function getUuidDbSize(): number {
+  return Object.keys(UUID_DB).length;
+}
+
+export function getUuidDbKeys(): string[] {
+  return Object.keys(UUID_DB);
 }
 
 // ---------------------------------------------------------------------------
