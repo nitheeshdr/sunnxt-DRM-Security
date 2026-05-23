@@ -498,6 +498,79 @@ edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
 | 1001 | SEGMENT_NOT_FOUND | CDN token expired |
 | 1002 | BAD_HTTP_STATUS | CDN returned non-200 |
 
+### FairPlay DRM (Safari / iOS)
+
+FairPlay is Apple's content protection system. It is the only DRM that works in Safari and all iOS browsers. Widevine and PlayReady are blocked on Apple platforms in Safari.
+
+**Key system:** `com.apple.fps.1_0`  
+**Stream format:** `hls-fp-aapl` (HLS + FairPlay)  
+**Protocol:** HTTPS Key Delivery (different from Widevine's binary protobuf EME flow)
+
+```
+Safari
+  ├── GET serverCertificateUri → license proxy GET handler → Nagravision FairPlay cert
+  ├── Encrypt license challenge using cert
+  ├── POST challenge → license proxy POST handler → nagravisionDRMProxy
+  └── Receive FairPlay license → CDM decrypts HLS segments
+```
+
+**Implementation:**
+- `serverCertificateUri` points to `/api/license?url=<cert-url>&isLive=1` — proxy fetches certificate from Nagravision via GET, attaching session cookie
+- License challenge routed to `nagravisionDRMProxy` (via `isLive=1` flag) — `modularLicense` does not support FairPlay challenge format
+- `hls-fp-aapl` is selected before the generic HLS fallback to avoid `hlsaes` taking priority on Safari
+
+### Live Channel DRM Fix (isLive=1 Flag)
+
+`modularLicense` returns HDCP_V2-enforcing Widevine licenses for all live channel content IDs. This is a static Nagravision license template policy — it is unconditional and cannot be changed by varying the Widevine robustness hints in the challenge.
+
+**Fix:** `isLive=1` in the license proxy URL routes requests to `nagravisionDRMProxy` instead of `modularLicense`. `nagravisionDRMProxy` does not apply the unconditional HDCP requirement to SD live channels.
+
+**Result:**
+- SD live channels: play on Chrome/Firefox/Edge/Android after fix
+- HD live channels (`*HDB_IN`): still blocked on desktop — HDCP_V2 policy exists at channel level in Nagravision CAS, not just in `modularLicense`
+- Android TV / Chromecast: play HD live channels (hardware HDCP path satisfies requirement)
+
+---
+
+## 7a. Download Feature — DASH-to-fMP4 Streaming
+
+### Route
+
+```
+GET /api/download/video/[contentId]              → stream info JSON
+GET /api/download/video/[contentId]?stream=1&track=video  → fMP4 video stream
+GET /api/download/video/[contentId]?stream=1&track=audio  → fMP4 audio stream
+GET /api/download/video/[contentId]?stream=1&merge=1      → merged fMP4 (ffmpeg, local only)
+```
+
+### MPD Parser
+
+- Handles `SegmentTemplate` + `SegmentTimeline`
+- Picks highest-bandwidth video `Representation`
+- Resolves `$Time$` and `$Number$` template variables for each segment URL
+- Preserves Akamai `hdntl` auth tokens from MPD URL query string in all segment requests
+
+### fMP4 Assembly
+
+```
+Response stream = init.mp4 + segment_1.m4s + segment_2.m4s + ...
+```
+
+Video and audio are separate streams. Merge locally:
+```bash
+ffmpeg -i video.mp4 -i audio.mp4 -c copy merged.mp4
+```
+
+Server-side merge (`?stream=1&merge=1`) requires `ffmpeg` on the server — not compatible with Vercel serverless.
+
+### Security Relevance
+
+- CDN serves segments without subscription check — only `hdntl` token required (VULN-06)
+- For DRM content: segments download as CENC-encrypted bytes; content key required for playback
+- VOD content key obtainable via `modularLicense` (VULN-11) — complete offline extraction path
+- Live channel keys: `modularLicense` returns HDCP-enforcing licenses; not practical for offline extraction in browser context
+- Download button in player UI is accessible to unauthenticated users (VULN-16 — server session proxied)
+
 ---
 
 ## 8. Bypass Mechanisms
