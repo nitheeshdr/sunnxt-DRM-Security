@@ -41,31 +41,34 @@ By building a full working client that:
 
 ## What Security Issues Were Found?
 
-During this project, **10 security vulnerabilities** were identified across the SunNXT platform:
+During this project, **20 security vulnerabilities** were identified across the SunNXT platform:
 
 | Severity | Count | Examples |
 |---|---|---|
-| **High** | 1 | Static AES key hardcoded in client JS |
-| **Medium** | 5 | Device limit bypass, no rate limiting, geo-block bypass |
-| **Low** | 2 | CDN token sharing, DRM JWT reuse window |
-| **Informational** | 2 | Wrong HTTP status codes, session TTL gaps |
+| **Critical** | 2 | DRM license endpoint has no auth (VULN-11); server subscription shared to all users (VULN-16) |
+| **High** | 4 | Static AES key in client JS; wildcard CDN token; permanent UUIDs; permanent access chain |
+| **Medium** | 8 | Device limit bypass, no rate limiting, phone enumeration, geo-block bypass, and more |
+| **Low** | 3 | DRM JWT reuse, HTTP 200 for errors, heartbeat injection |
+| **Informational** | 3 | Key in multiple files, regex injection, best-practice gaps |
 
 See [SECURITY_REPORT.md](../SECURITY_REPORT.md) for the full detailed report.
 
-The most impactful finding: **the AES-128 encryption key used to "secure" login credentials is shipped to every browser** in SunNXT's client-side JavaScript. Anyone who opens Chrome DevTools can extract it in 30 seconds.
+The most critical finding: **the DRM license endpoint issues Widevine decryption keys without any authentication or subscription check (VULN-11)**. Combined with a wildcard CDN token (`acl=/*`, VULN-06) and permanent content UUIDs (VULN-12), this enables complete subscription bypass.
+
+The foundational discovery: **the AES-128 encryption key used to "secure" API responses is shipped to every browser** in SunNXT's client-side JavaScript. Anyone can find it in Chrome DevTools in 30 seconds.
 
 ---
 
-## What Can NOT Be Bypassed
+## What This Research Demonstrates
 
-Despite the vulnerabilities found, **premium content cannot be accessed without a valid subscription**:
+This research demonstrates a complete chain from "unsubscribed user" to "full premium content access":
 
-- All premium streams are CENC-encrypted with Widevine or PlayReady
-- Decryption keys live inside the browser's hardware-protected CDM (Content Decryption Module)
-- The Nagravision DRM license server validates account credentials before issuing any keys
-- No unencrypted stream variants were found for premium content
+1. **CDN access** — wildcard hdntl token (`acl=/*`) lets any token cover all content (VULN-06)
+2. **Permanent CDN paths** — content UUIDs never rotate (VULN-12)
+3. **DRM keys without auth** — modularLicense issues keys without any auth (VULN-11)
+4. **Self-refreshing** — hdntl tokens auto-renew from MPD segment templates
 
-This is important: the security weaknesses are in the **auth and session layer**, not in the DRM content protection layer.
+The three fixes that would break this chain: scope hdntl tokens per-content, add auth to modularLicense, and rotate CDN paths periodically.
 
 ---
 

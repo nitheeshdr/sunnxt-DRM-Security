@@ -17,15 +17,20 @@ Updated every few years (current version: 2021), it ranks risks by:
 
 ---
 
-## SunNXT Findings Mapped to OWASP Top 10
+## SunNXT Findings Mapped to OWASP Top 10 (All 20 Vulnerabilities)
 
-| OWASP Category | SunNXT Vulnerability | Severity |
+| OWASP Category | SunNXT Vulnerabilities | Highest Severity |
 |---|---|---|
-| A01 — Broken Access Control | VULN-03, VULN-05, VULN-07 | Medium |
-| A02 — Cryptographic Failures | VULN-01, VULN-02 | High / Medium |
-| A07 — Identification & Auth Failures | VULN-04, VULN-10 | Medium |
-| A05 — Security Misconfiguration | VULN-09 | Informational |
-| A04 — Insecure Design | VULN-06, VULN-08 | Low |
+| A01 — Broken Access Control | VULN-03, VULN-05, VULN-07, VULN-14, VULN-15, VULN-16, VULN-17 | **Critical** (VULN-16) |
+| A02 — Cryptographic Failures | VULN-01, VULN-02, VULN-18 | High (VULN-01) |
+| A03 — Injection | VULN-17, VULN-19 | Low (VULN-17) |
+| A04 — Insecure Design | VULN-06, VULN-12, VULN-20 | High (VULN-06) |
+| A05 — Security Misconfiguration | VULN-09, VULN-14 | Medium (VULN-14) |
+| A07 — Identification & Auth Failures | VULN-04, VULN-08, VULN-10, VULN-11 | **Critical** (VULN-11) |
+| A08 — Software Integrity Failures | VULN-13 | Medium (VULN-13) |
+| A09 — Security Logging Failures | VULN-09 | Low |
+
+**New findings (VULN-11 to VULN-20)** reveal two critical vulnerabilities that enable complete subscription bypass — see [SECURITY_REPORT.md](../SECURITY_REPORT.md) and [COMPREHENSIVE.md](COMPREHENSIVE.md) for full details.
 
 ---
 
