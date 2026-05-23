@@ -519,7 +519,8 @@ Step 7: CDM decrypts keys → segments decrypt → video plays
 
 - **Widevine L3 key extraction** — Requires specialized tooling; not practical for casual bypass
 - **Content that has no UUID in the database** — Bypass 3 fails; requires subscribed session to discover UUID
-- **FairPlay (Safari/iOS)** — Requires Apple device certificate; different license server
+- **FairPlay (Safari/iOS)** — FairPlay (`hls-fp-aapl`) is now supported via the license proxy GET handler, which returns the Nagravision FairPlay server certificate. License requests use `com.apple.fps.1_0` and are routed with `isLive=1` to skip `modularLicense` (Widevine-only). FairPlay on iOS can now be used to obtain HLS stream access.
+- **HD Live Channels on Desktop** — `*HDB_IN` live channels enforce HDCP_V2 at the Nagravision CAS level. Even with `nagravisionDRMProxy` (bypassing `modularLicense`), the license still mandates HDCP for HD live IDs. Hardware HDCP is required (Android TV, Chromecast, physical display path).
 
 ---
 
@@ -559,6 +560,40 @@ Replace hdntl (24h wildcard) with hdnea (3h content-specific):
   Better:  acl=!*/contentId/* → per-content, 3h TTL
   Best:    acl=!*/contentId/* + IP binding (ip= parameter in Akamai config)
 ```
+
+---
+
+---
+
+## 14. isLive=1 Flag — Routing to nagravisionDRMProxy
+
+The license proxy (`/api/license`) accepts an `isLive=1` query parameter that bypasses `modularLicense` entirely and routes directly to the original `nagravisionDRMProxy` URL with the server session (JWT + cookie).
+
+**When isLive=1 is set:**
+- Live channels: `modularLicense` applies `output_protection.hdcp = HDCP_V2` to all live content IDs unconditionally (static Nagravision CAS template). This causes `output-restricted` key status in the browser CDM for SD and HD channels alike. `nagravisionDRMProxy` applies HDCP only to actual HD channel IDs.
+- FairPlay (`hls-fp-aapl`): `modularLicense` speaks Widevine binary protocol. A FairPlay challenge sent to `modularLicense` produces a malformed or rejected response. `nagravisionDRMProxy` handles FairPlay correctly.
+
+```
+GET /api/license?url=<licenseUrl>&contentId=<id>&isLive=1
+  → skips modularLicense
+  → routes to nagravisionDRMProxy with cookie + JWT
+```
+
+---
+
+## 15. Download Feature — License Interaction
+
+`GET /api/download/video/[contentId]?stream=1&merge=1` downloads and merges video+audio via server-side ffmpeg. The segments fetched are the raw Akamai CDN bytes — CENC-encrypted if the source stream has DRM.
+
+**To produce a playable file from encrypted content:**
+```
+1. GET /api/download/video/<id>?stream=1&merge=1 → encrypted_merged.mp4
+2. POST /api/license?url=<licenseUrl>&contentId=<id> → Widevine license binary
+3. Extract AES-128 content key from license (requires mp4decrypt or similar)
+4. mp4decrypt --key <kid>:<key> encrypted_merged.mp4 decrypted.mp4
+```
+
+Step 2 uses `modularLicense` (VULN-11 — no subscription check). The complete decryption chain requires no subscription and no ongoing authentication beyond the server's session (VULN-16).
 
 ---
 

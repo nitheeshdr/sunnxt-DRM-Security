@@ -5,7 +5,7 @@
 **Assessment Type: Black-Box Web Application & API Security Testing**
 **Scope: sunnxt.com — Web App, REST APIs, CDN, DRM Infrastructure**
 **Test Period: May 2026**
-**Report Version: 2.0 — Final (with all 20 findings)**
+**Report Version: 2.3 — Final + addendum (FairPlay, live DRM fix, download/merge feature)**
 **Classification: Confidential — For SunNXT Security Team Only**
 
 ---
@@ -659,3 +659,47 @@ Testing performed against `www.sunnxt.com` and supporting infrastructure using:
 
 *Report prepared by Nitheesh D R for authorized security research and responsible disclosure.*
 *All testing conducted against own accounts and own infrastructure. No production user data was accessed.*
+
+---
+
+## Addendum v2.3 — New Findings (May 2026)
+
+### Finding G: FairPlay DRM — Safari / iOS
+
+**Severity:** Informational (implementation fix, not a SunNXT vulnerability)
+
+The `hls-fp-aapl` stream format was never selected on Safari/iOS. The generic HLS check matched `hlsaes` first, so FairPlay streams were always skipped. On Safari/iOS, `com.apple.fps.1_0` must be the active key system — using Widevine or PlayReady on Apple devices results in EME error 6001.
+
+**Fix:** Explicit FairPlay format detection (`isSafari && v.format === "hls-fp-aapl"`), placed before the generic HLS fallback in the format priority list. Player configures `com.apple.fps.1_0` with `serverCertificateUri` pointing to the license proxy GET handler. The license proxy GET handler returns the Nagravision FairPlay server certificate. `isLive=1` is set for FairPlay requests to skip `modularLicense` (Widevine-only binary protocol; FairPlay challenges are incompatible).
+
+### Finding H: Live Channel DRM — modularLicense Applies HDCP to All Live IDs
+
+**Severity:** Informational (root cause of finding E, v2.1)
+
+`modularLicense` returns Widevine licenses with `output_protection.hdcp = HDCP_V2` for all live channel content IDs without exception — including SD channels. This is not a per-channel policy; it is a blanket live-content template in Nagravision's CAS. Configuring Widevine L3 robustness (`SW_SECURE_DECODE`) in the license challenge does not change this.
+
+**Fix:** `isLive=1` flag routes live channel license requests directly to `nagravisionDRMProxy` (authenticated), bypassing `modularLicense`. `nagravisionDRMProxy` applies HDCP only to actual HD channel IDs (`*HDB_IN`), not SD. SD live channels now play on desktop browsers. HD live channels remain blocked on desktop (hardware HDCP required).
+
+### Finding I: Download Feature — DASH-to-fMP4 with Server-Side ffmpeg Merge
+
+**Route:** `GET /api/download/video/[contentId]`
+
+| Parameter | Effect |
+|---|---|
+| *(none)* | Returns info JSON with URLs and encryption status |
+| `?stream=1&merge=1` | Collects video+audio, merges with ffmpeg, streams merged MP4 |
+| `?stream=1&track=video` | Streams raw video fMP4 segments |
+| `?stream=1&track=audio` | Streams raw audio fMP4 segments |
+| `?stream=1&debug=mpd` | Returns raw MPD XML for inspection |
+
+**Merge implementation:** Both tracks are collected sequentially in memory (`collectTrack()`), written to a `mkdtemp` temp dir, then `spawn('ffmpeg', ['-i', videoPath, '-i', audioPath, '-c', 'copy', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'])` pipes merged output to the HTTP response. Returns HTTP 503 if ffmpeg is not on PATH.
+
+**Security observations:**
+- CDN segment access uses the server's session (VULN-16 — no browser auth required)
+- Downloaded segments are CENC-encrypted for DRM content; key available via VULN-11
+- Complete offline extraction chain: `?stream=1&merge=1` → merged encrypted MP4 → `modularLicense` key → `mp4decrypt` → plaintext MP4
+- Not compatible with Vercel serverless (temp disk, execution time limits)
+
+**Player UI:** Single "Download MP4" button (red). Separate "Download Video" / "Download Audio" buttons removed.
+
+*Addendum v2.3 prepared by Nitheesh D R — May 23, 2026.*

@@ -11,7 +11,7 @@
 | **Scope** | sunnxt.com — Web App, REST APIs, CDN, DRM Infrastructure |
 | **Test Period** | May 2026 |
 | **Report Date** | May 23, 2026 |
-| **Report Version** | 2.2 — Updated with FairPlay DRM support, live channel DRM fix, and download feature findings |
+| **Report Version** | 2.3 — Updated with FairPlay DRM support, live channel DRM fix, download feature, and server-side ffmpeg merge |
 | **Classification** | Confidential — For SunNXT Security Team Only |
 
 ---
@@ -1078,6 +1078,8 @@ A new route `GET /api/download/video/[contentId]` was implemented and tested. Se
 
 **MPD parsing:** The route implements a SegmentTemplate + SegmentTimeline parser. Akamai `hdntl` auth tokens from the MPD URL query string are preserved and forwarded with every segment request. The parser picks the highest-bandwidth video `Representation` and the first audio `Representation`.
 
-**Player UI:** A download button appears in the top-right of the player once stream info loads. It displays video/audio download links and encryption status. This surface (download button + stream info endpoint) is accessible to any unauthenticated user due to VULN-16 (server session proxied to all users).
+**Server-side ffmpeg merge — implementation detail:** `checkFfmpeg()` runs `which ffmpeg` to detect the binary. `collectTrack()` fetches init.mp4 and all media segments sequentially, concatenates them into a single Uint8Array in memory. Both video and audio tracks are collected in parallel (`Promise.all`), written to temp files via Node.js `fs/promises`, then ffmpeg is spawned with `-c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1`. ffmpeg stdout is piped directly to the HTTP response stream. Temp dir is cleaned up on ffmpeg `close` regardless of exit code. This implementation runs correctly in local Node.js but fails on Vercel serverless: (1) the `/tmp` filesystem is limited and shared across concurrent invocations; (2) function execution time limits are shorter than a full-film segment collect + transcode operation.
 
-*Addendum v2.2 prepared by Nitheesh D R — May 2026.*
+**Player UI:** A download button appears in the top-right of the player. When clicked it shows a panel with a single **"Download MP4"** button that points to `?stream=1&merge=1`. Encryption status and a note about server-side merge are shown below. The separate "Download Video" / "Download Audio" buttons and the manual ffmpeg command note have been removed. This surface is accessible to any unauthenticated user due to VULN-16 (server session proxied to all users).
+
+*Addendum v2.2 prepared by Nitheesh D R — May 2026. Updated v2.3 May 2026 (merge implementation completed).*

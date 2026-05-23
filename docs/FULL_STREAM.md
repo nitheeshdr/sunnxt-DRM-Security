@@ -39,13 +39,38 @@ SunNXT returns multiple stream formats per content in the `videos.values` array.
 
 ### 1.1 Format Selection Priority (Player)
 
+On Safari/iOS, FairPlay HLS is preferred because Apple's EME only supports `com.apple.fps.1_0`:
+
 ```typescript
 // app/player/[contentId]/page.tsx
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+const fairPlayHls = isSafari ? videos.find((v) => v.format === "hls-fp-aapl") : undefined;
+
+const ordered = (isSafari
+  ? [clearDash, fairPlayHls, hlsVideo, cencDash, widevineDash, videos[0]]
+  : [clearDash, widevineDash, cencDash, hlsVideo, videos[0]]
+)
+```
+
+FairPlay config:
+```typescript
+if (isFairPlay) {
+  player.configure({
+    drm: {
+      servers: { "com.apple.fps.1_0": proxyLicenseUrl },
+      advanced: { "com.apple.fps.1_0": { serverCertificateUri: proxyLicenseUrl } },
+    },
+  });
+}
+```
+
+Non-Safari priority:
+```typescript
 const ordered = [
   clearDash,    // format=dash, no licenseUrl (Akamai CDN — nominally unencrypted)
   widevineDash, // format=dash, with licenseUrl (modularLicense/nagravision)
   cencDash,     // format=dash-cenc, with licenseUrl
-  hlsVideo,     // format=hls or hlsaes (not hls-fp-aapl unless Safari)
+  hlsVideo,     // format=hls or hlsaes (not hls-fp-aapl)
   videos[0],    // fallback: first entry
 ]
 .filter(not already failed)
@@ -768,6 +793,70 @@ player.addEventListener("error", (event) => {
 | 4012 | RESTRICTIONS_CANNOT_BE_MET | CDM rejected license (JSON error passed as binary) | Validate first byte in license proxy; 4012 added to DRM error set |
 | 1001 | HTTP_ERROR | Segment download 403/404 | Format fallback; CDN token check |
 | 4016 | CONTENT_TRANSFORMATION_FAILED | Decryption failed despite valid license | Usually key mismatch; retry with fresh license |
+
+---
+
+---
+
+## 16. Download Feature — DASH-to-fMP4 Segment Streaming
+
+### 16.1 Route Structure
+
+```
+GET /api/download/video/[contentId]
+  → (no params)          Info JSON: title, encryption status, download URLs
+  → ?stream=1&merge=1    Server-side ffmpeg merge (video+audio → single MP4)
+  → ?stream=1&track=video  Raw video fMP4 segments streamed directly
+  → ?stream=1&track=audio  Raw audio fMP4 segments streamed directly
+  → ?stream=1&debug=mpd  Raw MPD XML returned for inspection
+```
+
+### 16.2 MPD Parser
+
+The route implements a regex-based SegmentTemplate + SegmentTimeline parser:
+
+```
+1. Parse MPD-level <BaseURL> → mpdBase
+2. For each <AdaptationSet>:
+   a. Check mimeType attribute (video/* or audio/*)
+   b. Parse AdaptationSet-level <BaseURL>
+   c. Parse <SegmentTemplate>: initialization, media, startNumber, timescale, duration
+   d. Parse <SegmentTimeline> <S> elements: d (duration), r (repeat count) → segment count
+   e. Find highest-bandwidth <Representation> (opening tag only — body not needed)
+   f. Expand $RepresentationID$, $Bandwidth$, $Number$ templates
+   g. Resolve against adaptBase, append MPD URL query string (Akamai hdntl token)
+3. Return highest-bandwidth AdaptationSet result
+```
+
+Fallback: when SegmentTimeline is absent, count = ceil(periodDuration × timescale / tmplDuration).
+
+### 16.3 fMP4 Assembly
+
+Segments are fetched and streamed (or collected) in order: `init.mp4` first, then all media segments numbered `startNumber` to `startNumber + count - 1`. The result is a valid fragmented MP4 (CMAF / fMP4) that can be played directly if the content is unencrypted, or decrypted with the content key if CENC-encrypted.
+
+### 16.4 Server-Side Merge
+
+```
+?stream=1&merge=1 flow:
+1. checkFfmpeg() → which ffmpeg → path or 503
+2. parseMpdTrack(mpdXml, ..., "video") + parseMpdTrack(mpdXml, ..., "audio")
+3. collectTrack() × 2 in parallel (Promise.all)
+   - Each: init.mp4 + all segments → single concatenated Uint8Array
+4. mkdtemp → write video.mp4 + audio.mp4 to temp dir
+5. spawn ffmpeg -i video.mp4 -i audio.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1
+6. Pipe ffmpeg stdout → HTTP response (TransformStream)
+7. On ffmpeg close: rm -rf temp dir
+```
+
+Limitations: not compatible with Vercel serverless (temp disk, execution time cap).
+
+### 16.5 Live Channel DRM — isLive=1 Flag
+
+The license proxy accepts `?isLive=1` to skip `modularLicense`. This is used for:
+- Live channels: `modularLicense` returns HDCP_V2-enforcing licenses for all live content IDs unconditionally
+- FairPlay: `modularLicense` speaks Widevine binary protocol; FairPlay challenges are incompatible
+
+When `isLive=1`, the proxy routes directly to the original `nagravisionDRMProxy` URL (authenticated, with session JWT + cookie).
 
 ---
 
