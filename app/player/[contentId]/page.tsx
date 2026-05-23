@@ -23,6 +23,13 @@ export default function PlayerPage({ params }: Props) {
   const [mediaLoading, setMediaLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isGeoBlocked, setIsGeoBlocked] = useState(false);
+  const [downloadInfo, setDownloadInfo] = useState<{
+    encrypted: boolean;
+    videoUrl: string;
+    audioUrl: string;
+    note: string;
+  } | null>(null);
+  const [showDownload, setShowDownload] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const playerRef = useRef<any>(null);
@@ -36,6 +43,7 @@ export default function PlayerPage({ params }: Props) {
       setContentId(id);
       fetchContent(id);
       loadAndPlay(id);
+      fetchDownloadInfo(id);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -57,6 +65,20 @@ export default function PlayerPage({ params }: Props) {
       const results = data.results || [];
       if (results[0]) setItem(results[0]);
     } catch { /* non-critical — content info is supplementary */ }
+  }
+
+  async function fetchDownloadInfo(id: string) {
+    try {
+      const res = await fetch(`/api/download/video/${id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setDownloadInfo({
+        encrypted: data.encrypted,
+        videoUrl: data.videoDownloadUrl,
+        audioUrl: data.audioDownloadUrl,
+        note: data.note,
+      });
+    } catch { /* non-critical */ }
   }
 
   async function loadAndPlay(id: string) {
@@ -520,7 +542,76 @@ export default function PlayerPage({ params }: Props) {
             </svg>
           </button>
         </div>
+
+        {/* Download button (top-right) — only shown when stream info is ready */}
+        {downloadInfo && (
+          <div className="absolute top-4 right-4 z-10">
+            <button
+              onClick={() => setShowDownload((v) => !v)}
+              title="Download"
+              className="bg-black/50 hover:bg-black/80 text-white p-2 rounded-full transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 3v12" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Download panel — shown below player when toggled */}
+      {showDownload && downloadInfo && (
+        <div className="max-w-350 mx-auto px-6 sm:px-10 pt-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-white font-semibold text-sm">Download</h3>
+              <button onClick={() => setShowDownload(false)} className="text-gray-500 hover:text-white text-xs">
+                Close
+              </button>
+            </div>
+
+            {downloadInfo.encrypted && (
+              <div className="mb-3 flex items-start gap-2 bg-yellow-900/30 border border-yellow-700/50 rounded-lg px-3 py-2">
+                <svg className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 15v2m0 0v2m0-2h2m-2 0H10m2-6V7m0 0a2 2 0 100-4 2 2 0 000 4z" />
+                </svg>
+                <p className="text-yellow-300 text-xs leading-relaxed">{downloadInfo.note}</p>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-3">
+              <a
+                href={downloadInfo.videoUrl}
+                download
+                className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 10l5 5 5-5M12 3v12" />
+                </svg>
+                Download Video
+              </a>
+              <a
+                href={downloadInfo.audioUrl}
+                download
+                className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm12-3c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2z" />
+                </svg>
+                Download Audio
+              </a>
+            </div>
+            <p className="text-gray-500 text-xs mt-3">
+              Video and audio are downloaded as separate fMP4 tracks. Merge with:
+              <code className="ml-1 text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded text-[11px]">
+                ffmpeg -i video.mp4 -i audio.mp4 -c copy merged.mp4
+              </code>
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Content info */}
       <div className="max-w-350 mx-auto px-6 sm:px-10 py-8">
