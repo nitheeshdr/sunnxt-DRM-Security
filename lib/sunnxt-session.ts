@@ -60,6 +60,10 @@ async function attemptLogin(): Promise<{ cookies: string; response: Record<strin
   });
 
   const cookies = extractCookies(res);
+  const ct = res.headers.get("content-type") ?? "";
+  if (!ct.includes("json")) {
+    throw new Error(`SunNXT login returned non-JSON (status ${res.status}) — likely rate-limited, try again in a minute`);
+  }
   const raw = await res.json() as { response?: string };
   const data = raw.response ? (decryptResponse(raw.response) as Record<string, unknown>) : raw;
   return { cookies, response: data };

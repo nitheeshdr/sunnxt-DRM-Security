@@ -208,11 +208,10 @@ export async function runHarvest(baseUrl: string): Promise<void> {
     ]);
 
     // Dense ID ranges where SunNXT content lives (discovered empirically)
-    await discoverFromIdRange(ids, 7000, 12000);      // high-density movie range
-    await discoverFromIdRange(ids, 50000, 60000, 5);  // sparser newer content
+    await discoverFromIdRange(ids, 7000, 12000);       // high-density movie range
+    await discoverFromIdRange(ids, 50000, 60000, 5);   // sparser newer content
     await discoverFromIdRange(ids, 100000, 110000, 10);
-    await discoverFromIdRange(ids, 200000, 210000, 10);
-    await discoverFromIdRange(ids, 250000, 260000, 10);
+    await discoverFromIdRange(ids, 200000, 260000, 10); // full 200k–260k band (was split)
 
     // Remove already-known and non-numeric IDs
     for (const id of alreadyKnown) ids.delete(id);

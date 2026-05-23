@@ -5,6 +5,7 @@ import {
   extractAndCacheHdntl,
   learnUuidsFromEntries,
   buildBypassEntries,
+  hasFullBypassFor,
   type VideoEntry,
 } from "@/lib/cdn-bypass";
 
@@ -143,13 +144,69 @@ export async function GET(
     );
   }
 
+  // VULN-20 fast path: UUID in DB + valid hdntl → skip all SunNXT API calls entirely.
+  // Content never needs re-fetched once we have both; the token self-refreshes via stream proxy.
+  if (hasFullBypassFor(contentId)) {
+    const fastEntries = buildBypassEntries(contentId)!;
+    console.log(`media/${contentId}: VULN-20 fast bypass — no API call needed`);
+    return NextResponse.json(buildBypassResponse(contentId, fastEntries, {}));
+  }
+
   try {
     let res = await fetchMedia(contentId, cookieHeader);
+    if (!res.headers.get("content-type")?.includes("json")) {
+      console.warn(`media/${contentId}: upstream returned non-JSON (status ${res.status}), trying bypass paths`);
+      // Treat like a paywall block — fall through to bypass attempts
+      const bypassEntries = buildBypassEntries(contentId);
+      if (bypassEntries) {
+        console.log(`media/${contentId}: CDN UUID+hdntl bypass succeeded (upstream non-JSON)`);
+        return NextResponse.json(buildBypassResponse(contentId, bypassEntries, {}));
+      }
+      return NextResponse.json(
+        { code: 503, error: "upstream_error", message: "SunNXT API unavailable, please try again shortly." },
+        { status: 503 }
+      );
+    }
     let raw = await res.json() as Record<string, unknown>;
 
     let data: Record<string, unknown> = raw;
     if (raw.response) {
       try { data = decrypt(raw.response as string); } catch { data = raw; }
+    }
+
+    // 400 ERR_CLIENT_NOT_ALLOWED = SunNXT is blocking this session/IP — treat like paywall
+    const isBlocked = data.code === 400 && (data.status as string)?.includes("CLIENT_NOT_ALLOWED");
+    if (isBlocked) {
+      console.log(`media/${contentId}: ERR_CLIENT_NOT_ALLOWED — skipping to bypass paths`);
+      // Try bypass 2 first (synchronous, no SunNXT API needed)
+      const blockedBypassEntries = buildBypassEntries(contentId);
+      if (blockedBypassEntries) {
+        console.log(`media/${contentId}: CDN UUID+hdntl bypass succeeded (session blocked)`);
+        return NextResponse.json(buildBypassResponse(contentId, blockedBypassEntries, {}));
+      }
+      // Try bypass 3 (pwaapi, different endpoint, often not rate-limited)
+      try {
+        const bRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
+        if (bRes.headers.get("content-type")?.includes("json")) {
+          const bRaw = await bRes.json() as Record<string, unknown>;
+          let bData: Record<string, unknown> = bRaw;
+          if (bRaw.response) { try { bData = decrypt(bRaw.response as string); } catch { bData = bRaw; } }
+          if (hasVideos(bData)) {
+            console.log(`media/${contentId}: pwaapi bypass succeeded (main session blocked)`);
+            harvestBypassData(contentId, bData);
+            normalizeVideos(bData);
+            return NextResponse.json(bData);
+          }
+        }
+      } catch (e) {
+        console.warn(`media/${contentId}: pwaapi bypass error:`, e);
+      }
+      // Invalidate session so the next request gets a fresh one
+      invalidateSession();
+      return NextResponse.json(
+        { code: 503, error: "session_blocked", message: "SunNXT blocked this session. Clear your session and try again." },
+        { status: 503 }
+      );
     }
 
     const videosErr = getVideosError(data);
@@ -166,6 +223,7 @@ export async function GET(
           if (serverCookie !== cookieHeader) {
             console.log(`media/${contentId}: retrying with server subscribed session`);
             const serverRes = await fetchMedia(contentId, serverCookie);
+            if (!serverRes.headers.get("content-type")?.includes("json")) throw new Error("non-JSON from server session");
             const serverRaw = await serverRes.json() as Record<string, unknown>;
             let serverData: Record<string, unknown> = serverRaw;
             if (serverRaw.response) {
@@ -199,6 +257,7 @@ export async function GET(
       // and UUID DB from the returned CDN URLs, enabling future bypass-2 calls.
       try {
         const bypassRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
+        if (!bypassRes.headers.get("content-type")?.includes("json")) throw new Error("non-JSON from contentDetail");
         const bypassRaw = await bypassRes.json() as Record<string, unknown>;
         let bypassData: Record<string, unknown> = bypassRaw;
         if (bypassRaw.response) {
@@ -238,6 +297,12 @@ export async function GET(
         return NextResponse.json({ code: 401, error: "Session refresh failed" }, { status: 401 });
       }
       res = await fetchMedia(contentId, cookieHeader);
+      if (!res.headers.get("content-type")?.includes("json")) {
+        return NextResponse.json(
+          { code: 503, error: "upstream_error", message: "SunNXT API unavailable after re-login, please try again shortly." },
+          { status: 503 }
+        );
+      }
       raw = await res.json() as Record<string, unknown>;
       data = raw;
       if (raw.response) {

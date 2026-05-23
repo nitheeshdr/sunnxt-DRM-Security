@@ -249,6 +249,11 @@ function getHdntl(): string | null {
   return hdntlCache.value;
 }
 
+/** Returns true when bypass path 2 can fire immediately (UUID in DB + valid hdntl). */
+export function hasFullBypassFor(contentId: string): boolean {
+  return !!(getContentEntry(contentId) && getHdntl());
+}
+
 // ---------------------------------------------------------------------------
 // Build synthetic video entries for subscription-blocked content
 // ---------------------------------------------------------------------------
