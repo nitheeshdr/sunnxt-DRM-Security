@@ -19,103 +19,127 @@ interface SegmentInfo {
   durationSec: number;
 }
 
-// Parse a DASH MPD and return segment URLs for the highest-quality track of the
-// given mimeType ("video" or "audio"). Handles SegmentTemplate + SegmentTimeline.
+// Parse a DASH MPD and return segment URLs for the highest-quality track.
+// Handles SegmentTemplate + SegmentTimeline. BaseURL is resolved at MPD/AdaptationSet level.
 function parseMpdTrack(
   mpdXml: string,
-  mpdUrl: string,
-  mimeType: "video" | "audio"
+  mpdBaseDir: string,
+  qs: string,
+  mimeType: "video" | "audio",
 ): SegmentInfo | null {
-  // Directory of the MPD (used to resolve relative BaseURL / segment paths)
-  const mpdBaseDir = mpdUrl.split("?")[0].replace(/\/[^/]+$/, "/");
-  // Query string carries Akamai auth tokens — attach to every segment URL
-  const qs = mpdUrl.includes("?") ? mpdUrl.slice(mpdUrl.indexOf("?")) : "";
+  // Resolve a segment path against a base dir, appending the auth query string
+  const resolveUrl = (path: string, base: string): string =>
+    path.startsWith("http") ? path + qs : base + path + qs;
 
-  // Grab all AdaptationSets whose mimeType starts with the target mimeType
-  const adaptPattern = new RegExp(
-    `<AdaptationSet\\b([^>]*)>([\\s\\S]*?)<\\/AdaptationSet>`,
-    "gi"
-  );
+  // MPD-level BaseURL (may be injected by stream-proxy or present natively)
+  const mpdBase = (() => {
+    const m = mpdXml.match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
+    const v = m?.[1]?.trim() ?? "";
+    return v.startsWith("http") ? v : v ? mpdBaseDir + v : mpdBaseDir;
+  })();
+
+  // Period duration in seconds — used when SegmentTemplate has @duration but no SegmentTimeline
+  const periodDuration = (() => {
+    const pt =
+      mpdXml.match(/mediaPresentationDuration="([^"]+)"/i)?.[1] ||
+      mpdXml.match(/<Period\b[^>]*\sduration="([^"]+)"/i)?.[1] || "";
+    const m = pt.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?/i);
+    if (!m) return 0;
+    return (parseInt(m[1] ?? "0") * 3600) + (parseInt(m[2] ?? "0") * 60) + parseFloat(m[3] ?? "0");
+  })();
 
   let best: SegmentInfo | null = null;
 
-  for (const adaptMatch of mpdXml.matchAll(adaptPattern)) {
+  for (const adaptMatch of mpdXml.matchAll(/<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi)) {
     const adaptAttrs = adaptMatch[1];
-    const adaptBody = adaptMatch[2];
+    const adaptBody  = adaptMatch[2];
 
-    // Match on contentType OR mimeType attribute
-    const mimeAttr =
+    // mimeType check — look in attrs and anywhere in the body
+    const mimeRaw =
       adaptAttrs.match(/mimeType="([^"]+)"/i)?.[1] ||
       adaptAttrs.match(/contentType="([^"]+)"/i)?.[1] ||
       adaptBody.match(/mimeType="([^"]+)"/i)?.[1] ||
-      "";
-    if (!mimeAttr.toLowerCase().startsWith(mimeType)) continue;
+      adaptBody.match(/contentType="([^"]+)"/i)?.[1] || "";
+    if (!mimeRaw || !mimeRaw.toLowerCase().startsWith(mimeType)) continue;
 
-    // AdaptationSet-level BaseURL (optional)
-    const adaptBaseUrl = (() => {
+    // AdaptationSet-level BaseURL
+    const adaptBase = (() => {
       const m = adaptBody.match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
-      if (!m) return mpdBaseDir;
-      return m[1].startsWith("http") ? m[1] : mpdBaseDir + m[1];
+      const v = m?.[1]?.trim() ?? "";
+      return v.startsWith("http") ? v : v ? mpdBase + v : mpdBase;
     })();
 
-    // SegmentTemplate attributes (may be on AdaptationSet or Representation)
-    const tmplBlock = adaptBody.match(/<SegmentTemplate\b([^>]*)>/i)?.[1] ?? "";
-    const initAttr = tmplBlock.match(/initialization="([^"]+)"/i)?.[1] ?? "init.mp4";
-    const mediaAttr = tmplBlock.match(/\bmedia="([^"]+)"/i)?.[1];
-    const startNum = parseInt(tmplBlock.match(/startNumber="(\d+)"/i)?.[1] ?? "1");
-    const timescale = parseInt(tmplBlock.match(/timescale="(\d+)"/i)?.[1] ?? "1");
+    // Shared SegmentTemplate attributes (at AdaptationSet level)
+    // Match both <SegmentTemplate .../> and <SegmentTemplate ...>
+    const tmplRaw = adaptBody.match(/<SegmentTemplate\b([^>]*)/i)?.[1] ?? "";
+    const sharedInit  = tmplRaw.match(/initialization="([^"]+)"/i)?.[1] ?? "init.mp4";
+    const sharedMedia = tmplRaw.match(/\bmedia="([^"]+)"/i)?.[1] ?? "";
+    const sharedStart = parseInt(tmplRaw.match(/startNumber="(\d+)"/i)?.[1] ?? "1");
+    const timescale   = parseInt(tmplRaw.match(/timescale="(\d+)"/i)?.[1] ?? "1");
+    const tmplDur     = parseInt(tmplRaw.match(/\bduration="(\d+)"/i)?.[1] ?? "0");
 
-    if (!mediaAttr) continue;
-
-    // Segment count and total duration from SegmentTimeline
-    const timelineBody = adaptBody.match(
-      /<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/i
-    )?.[1] ?? "";
-    let segCount = 0;
-    let totalTicks = 0;
-    for (const sMatch of timelineBody.matchAll(/<S\b([^/]*)\/>/gi)) {
-      const d = parseInt(sMatch[1].match(/\bd="(\d+)"/i)?.[1] ?? "0");
-      const r = parseInt(sMatch[1].match(/\br="(\d+)"/i)?.[1] ?? "0");
-      segCount += r + 1;
+    // Segment count from SegmentTimeline
+    // Match <S .../> AND <S ...> (with or without self-close slash, with or without space)
+    const tlBody = adaptBody.match(/<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/i)?.[1] ?? "";
+    let segCount = 0, totalTicks = 0;
+    for (const s of tlBody.matchAll(/<S\b([^>]*)/gi)) {
+      const a = s[1];
+      const d = parseInt(a.match(/\bd="(\d+)"/i)?.[1] ?? "0");
+      const r = parseInt(a.match(/\br="(\d+)"/i)?.[1] ?? "0");
+      segCount  += r + 1;
       totalTicks += d * (r + 1);
     }
+
+    // Fallback: derive count from @duration + period duration
+    if (segCount === 0 && tmplDur > 0 && periodDuration > 0) {
+      segCount = Math.ceil(periodDuration * timescale / tmplDur);
+      totalTicks = segCount * tmplDur;
+    }
     if (segCount === 0) continue;
-    const durationSec = totalTicks / timescale;
 
-    // Walk Representations and pick the highest bandwidth
-    for (const repMatch of adaptBody.matchAll(/<Representation\b([^>]*)>/gi)) {
-      const repAttrs = repMatch[1];
-      const bw = parseInt(repAttrs.match(/bandwidth="(\d+)"/i)?.[1] ?? "0");
-      if (best && bw <= best.bandwidth) continue;
+    const durationSec = totalTicks / (timescale || 1);
 
-      const codec = repAttrs.match(/codecs="([^"]+)"/i)?.[1] ?? "";
-      const width = parseInt(repAttrs.match(/width="(\d+)"/i)?.[1] ?? "0");
-      const height = parseInt(repAttrs.match(/height="(\d+)"/i)?.[1] ?? "0");
-      const repId = repAttrs.match(/\bid="([^"]+)"/i)?.[1] ?? "";
+    // Find highest-bandwidth Representation (only need opening tag attrs)
+    let bestBw = 0;
+    let bestRepId = "";
+    let bestCodec = "";
+    let bestWidth = 0;
+    let bestHeight = 0;
 
-      // Representation-level overrides for SegmentTemplate (rare but possible)
-      const repTmplBlock = repMatch[0].match(/<SegmentTemplate\b([^>]*)>/i)?.[1] ?? tmplBlock;
-      const repInitAttr = repTmplBlock.match(/initialization="([^"]+)"/i)?.[1] ?? initAttr;
-      const repMediaAttr = repTmplBlock.match(/\bmedia="([^"]+)"/i)?.[1] ?? mediaAttr;
-      const repStartNum = parseInt(repTmplBlock.match(/startNumber="(\d+)"/i)?.[1] ?? String(startNum));
+    for (const repM of adaptBody.matchAll(/<Representation\b([^>]*)/gi)) {
+      const ra = repM[1];
+      const bw = parseInt(ra.match(/bandwidth="(\d+)"/i)?.[1] ?? "0");
+      if (bw <= bestBw) continue;
+      bestBw     = bw;
+      bestRepId  = ra.match(/\bid="([^"]+)"/i)?.[1] ?? "";
+      bestCodec  = ra.match(/codecs="([^"]+)"/i)?.[1] ?? "";
+      bestWidth  = parseInt(ra.match(/width="(\d+)"/i)?.[1] ?? "0");
+      bestHeight = parseInt(ra.match(/height="(\d+)"/i)?.[1] ?? "0");
+    }
+    if (bestBw === 0) continue;
 
-      const expand = (tpl: string, num?: number) =>
-        tpl
-          .replace(/\$Bandwidth\$/g, String(bw))
-          .replace(/\$RepresentationID\$/g, repId)
-          .replace(/\$Number(?:%0(\d+)d)?\$/g, (_, pad) =>
-            num === undefined ? "0" : pad ? String(num).padStart(parseInt(pad), "0") : String(num)
-          );
+    const expand = (tpl: string, num?: number) =>
+      tpl
+        .replace(/\$Bandwidth\$/g, String(bestBw))
+        .replace(/\$RepresentationID\$/g, bestRepId)
+        .replace(/\$Number(?:%0(\d+)d)?\$/g, (_, pad) =>
+          num === undefined
+            ? "0"
+            : pad ? String(num).padStart(parseInt(pad), "0") : String(num)
+        );
 
-      const resolve = (filename: string) =>
-        filename.startsWith("http") ? filename + qs : adaptBaseUrl + filename + qs;
+    const initUrl    = resolveUrl(expand(sharedInit), adaptBase);
+    const segmentUrls = Array.from({ length: segCount }, (_, i) =>
+      resolveUrl(expand(sharedMedia, sharedStart + i), adaptBase)
+    );
 
-      const initUrl = resolve(expand(repInitAttr));
-      const segmentUrls = Array.from({ length: segCount }, (_, i) =>
-        resolve(expand(repMediaAttr, repStartNum + i))
-      );
-
-      best = { initUrl, segmentUrls, codec, bandwidth: bw, width, height, durationSec };
+    if (!best || bestBw > best.bandwidth) {
+      best = {
+        initUrl, segmentUrls,
+        codec: bestCodec, bandwidth: bestBw,
+        width: bestWidth, height: bestHeight,
+        durationSec,
+      };
     }
   }
 
@@ -140,6 +164,7 @@ export async function GET(
   const { contentId } = await params;
   const wantStream = request.nextUrl.searchParams.get("stream") === "1";
   const track = (request.nextUrl.searchParams.get("track") ?? "video") as "video" | "audio";
+  const debug = request.nextUrl.searchParams.get("debug");
 
   // --- Fetch media info via our own /api/media route (handles bypass/auth) ---
   const origin = new URL(request.url).origin;
@@ -170,7 +195,10 @@ export async function GET(
 
   if (!target) {
     return NextResponse.json(
-      { error: "No DASH stream available — only HLS formats found" },
+      {
+        error: "No DASH stream available — only HLS formats found",
+        formats: videos.map((v) => v.format),
+      },
       { status: 404 }
     );
   }
@@ -195,26 +223,51 @@ export async function GET(
     });
   }
 
-  // --- Streaming download mode ---
+  // --- Fetch the MPD manifest ---
   const cookie = await getSunnxtCookies().catch(() => "");
-
-  // Fetch the MPD manifest directly from CDN (server-side, no CORS needed)
   const mpdRes = await fetch(target.link, {
     headers: { ...CDN_HEADERS, ...(cookie ? { cookie } : {}) },
     cache: "no-store",
   });
   if (!mpdRes.ok) {
     return NextResponse.json(
-      { error: `Manifest fetch failed: HTTP ${mpdRes.status}` },
+      { error: `Manifest fetch failed: HTTP ${mpdRes.status}`, mpdUrl: target.link },
       { status: 502 }
     );
   }
   const mpdXml = await mpdRes.text();
 
-  const segInfo = parseMpdTrack(mpdXml, target.link, track);
+  // --- Debug mode: return raw MPD so the structure can be inspected ---
+  if (debug === "mpd") {
+    return new NextResponse(mpdXml, {
+      headers: { "content-type": "application/dash+xml; charset=utf-8" },
+    });
+  }
+
+  // Extract base dir and query string from the MPD URL
+  const rawMpdUrl = target.link;
+  const mpdBaseDir = rawMpdUrl.split("?")[0].replace(/\/[^/]+$/, "/");
+  const qs = rawMpdUrl.includes("?") ? rawMpdUrl.slice(rawMpdUrl.indexOf("?")) : "";
+
+  const segInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, track);
+
   if (!segInfo || segInfo.segmentUrls.length === 0) {
+    // Log enough of the MPD to diagnose the parse failure
+    const adaptSets = [...mpdXml.matchAll(/<AdaptationSet\b([^>]*)/gi)].map((m) => m[1].trim().slice(0, 120));
+    const tmplAttrs = [...mpdXml.matchAll(/<SegmentTemplate\b([^>]*)/gi)].map((m) => m[1].trim().slice(0, 120));
+    console.error(
+      `Download ${contentId}: MPD parse failed for track=${track}\n`,
+      `  adaptationSets: ${JSON.stringify(adaptSets)}\n`,
+      `  segmentTemplates: ${JSON.stringify(tmplAttrs)}\n`,
+      `  mpdUrl: ${rawMpdUrl.split("?")[0]}`
+    );
     return NextResponse.json(
-      { error: `No ${track} segments found in manifest` },
+      {
+        error: `No ${track} segments found in manifest`,
+        hint: `Call with ?stream=1&debug=mpd to inspect the raw manifest`,
+        adaptationSets: adaptSets,
+        segmentTemplates: tmplAttrs,
+      },
       { status: 404 }
     );
   }
@@ -228,22 +281,19 @@ export async function GET(
   );
 
   // Stream segments: init.mp4 followed by all media segments.
-  // The result is a valid fragmented MP4 (fMP4/CMAF) that most players can open.
-  // For encrypted content the segments are CENC-encrypted and need the content key to play.
+  // Result is a valid fragmented MP4 (fMP4/CMAF). For encrypted content,
+  // segments are CENC-encrypted and need the AES content key to decode.
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
 
   (async () => {
     try {
-      // Init segment (moov / ftyp box — required for a valid fMP4)
       const initBytes = await fetchBytes(segInfo.initUrl, cookie);
       await writer.write(initBytes);
 
-      // Media segments in order
       for (let i = 0; i < segInfo.segmentUrls.length; i++) {
         const segBytes = await fetchBytes(segInfo.segmentUrls[i], cookie);
         await writer.write(segBytes);
-        // Log progress every 50 segments
         if ((i + 1) % 50 === 0) {
           console.log(`Download ${contentId}: ${i + 1}/${segInfo.segmentUrls.length} segments`);
         }
