@@ -1,6 +1,6 @@
 <div align="center">
 
-# SunNXT Clone
+# Sunnxt DRM Security
 
 **A production-grade reverse-engineered streaming client built with Next.js**
 
